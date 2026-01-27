@@ -72,7 +72,7 @@ Key settings in `.env`:
 ## Project Structure
 
 ```
-├── app_fixed.py          # Main FastAPI application
+├── app.py          # Main FastAPI application
 ├── requirements.txt      # Dependencies
 ├── .env                  # Environment variables
 ├── storage/              # Session metadata
@@ -107,5 +107,3 @@ Key settings in `.env`:
 **Aditya Gavhane**  
 Final-year B.Tech student (AI & Analytics)  
 
-
-Sorry for the mix-up! This is now accurate to what's actually in your code. [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/59765842/afeca3f4-b7ad-48b2-856f-0f7a79cfe832/app_fixed.py)
