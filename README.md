@@ -1,101 +1,111 @@
-🤖 AI Document Search RAG Chatbot
-A full-stack AI-powered chatbot that provides factually grounded answers from user-uploaded documents using a Retrieval-Augmented Generation (RAG) architecture.
+# RAG PDF Chatbot
 
-🚀 Features
-Document Upload: Allows users to upload their own documents (e.g., PDFs, TXT) to create a custom knowledge base.
+A production-ready RAG (Retrieval-Augmented Generation) chatbot backend built with FastAPI and LangChain that allows multi-document question answering with persistent session management.
+***
 
-Retrieval-Augmented Generation (RAG): Implements a RAG pipeline to retrieve relevant document chunks and generate contextually accurate answers, significantly reducing hallucinations.
+## What This Project Does
 
-Persistent Knowledge Base: Utilizes a MySQL database to store document text chunks and their corresponding vector embeddings for efficient, long-term retrieval.
+1. Accepts PDF document uploads
+2. Splits documents into chunks and creates embeddings
+3. Stores vectors in ChromaDB with session persistence
+4. Answers questions strictly based on document context
+5. Manages multiple chat sessions with automatic cleanup
+6. Tracks LLM calls with LangSmith integration (optional)
 
-Interactive UI: A modern and responsive user interface built with React for seamless user interaction.
+***
 
-Persistent Chat History: Saves the conversation history, allowing users to reference previous questions and answers.
+## Tech Stack
 
-Open-Source LLM: Powered by the Mistral LLM via Ollama for powerful, locally-run language generation.
+- **Backend**: FastAPI
+- **LLM**: OpenRouter (Mixtral-8x7B-Instruct)
+- **Embeddings**: OpenAI text-embedding-3-small
+- **Vector Store**: ChromaDB
+- **RAG Framework**: LangChain
+- **Monitoring**: LangSmith (optional)
 
-🧐 Project Overview
-This chatbot addresses the challenge of getting reliable and context-specific answers from large language models. Instead of relying on the LLM's generic pre-trained knowledge, this application grounds its responses in the content of user-provided documents. When a user asks a question, the backend retrieves the most relevant text passages from the document database and feeds them to the LLM along with the original question. This ensures the generated answers are accurate, relevant, and directly supported by the source material.
+***
 
-⚙️ Technologies Used
-Backend: Python, Flask, LangChain, Ollama
+## Key Features
 
-Frontend: React, JavaScript, HTML/CSS
+- **Multi-document support** – Add multiple PDFs to a single session
+- **Persistent sessions** – Sessions and vector stores survive server restarts 
+- **Hallucination prevention** – Strict prompt template restricts answers to document context 
+- **Automatic cleanup** – LRU-based session removal when memory limits are exceeded 
+- **Source tracking** – Returns page numbers and chunk references for each answer 
 
-AI/ML: Mistral LLM, Sentence Transformers (for embeddings), RAG
+***
 
-Database: MySQL
+## How to Use
 
-🛠️ Setup Instructions
-Prerequisites:
-
-Python 3.8+
-
-Node.js and npm
-
-Ollama installed and running with the Mistral model (ollama pull mistral)
-
-A running MySQL server
-
-1. Clone the repository:
-
-Bash
-
-git clone https://github.com/adigavhane1013/AI-Document-Search-RAG-Chatbot.git
-cd AI-Document-Search-RAG-Chatbot
-2. Backend Setup:
-
-Bash
-
-# Navigate to the backend directory
-cd backend
-
-# Create and activate a virtual environment
-python -m venv venv
-# On Windows:
-.\venv\Scripts\activate
-# On macOS/Linux:
-# source venv/bin/activate
-
-# Install Python dependencies
+1. Install dependencies:
+```bash
 pip install -r requirements.txt
+```
 
-# Configure your database connection in a .env file or directly in the code
-# Run the backend server
-python app.py
-3. Frontend Setup:
+2. Create a `.env` file:
+```env
+OPENROUTER_API_KEY=your_api_key
+OPENROUTER_MODEL=mistralai/mixtral-8x7b-instruct
+TEMPERATURE=0.2
+```
 
-Bash
+3. Run the application:
+```bash
+python app_fixed.py
+```
 
-# Open a new terminal and navigate to the frontend directory
-cd frontend
+4. API will be available at `http://localhost:8000` 
 
-# Install Node.js dependencies
-npm install
+***
 
-# Run the React application
-npm start
-4. Access the application:
-Open your web browser and navigate to http://localhost:3000.
+## Configuration
 
-🎮 Usage
-Navigate to the web interface.
+Key settings in `.env`:
 
-Use the upload feature to add a new document to the knowledge base.
+- `CHUNK_SIZE` – Text chunk size 
+- `CHUNK_OVERLAP` – Overlap between chunks 
+- `TOP_K_RESULTS` – Number of chunks to retrieve
+- `MAX_SESSIONS_IN_MEMORY` – Session limit before cleanup
 
-Wait for the document to be processed and indexed.
+***
 
-Once ready, ask questions in the chat input box. The chatbot will provide answers based only on the content of your uploaded documents.
+## Project Structure
 
-💡 Notes
-Ensure your Ollama server is running with the Mistral model available before starting the backend.
+```
+├── app_fixed.py          # Main FastAPI application
+├── requirements.txt      # Dependencies
+├── .env                  # Environment variables
+├── storage/              # Session metadata
+│   └── sessions.json
+└── vectorstore/          # ChromaDB vector stores
+    └── session_{id}/
+```
 
-Database credentials and other sensitive keys should be managed securely, preferably using a .env file in the backend directory.
+***
 
-The initial processing of a large document may take a few moments as embeddings are generated and stored.
+## Notes
 
-👤 Author
-Aditya Gavhane
+- PDF files only (max 50MB) 
+- Sessions are automatically rebuilt on server restart
+- Vector stores are persisted to disk after each upload
+- Designed for single-user configuration per session
 
-📄 License
-This project is licensed under the MIT License.
+***
+
+## Future Improvements
+
+- Multi-format document support (DOCX, TXT, HTML)
+- User authentication and multi-tenancy
+- Conversation memory and context tracking
+- Real-time streaming responses
+- OCR integration for scanned documents
+
+***
+
+## Author
+
+**Aditya Gavhane**  
+Final-year B.Tech student (AI & Analytics)  
+
+
+Sorry for the mix-up! This is now accurate to what's actually in your code. [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/59765842/afeca3f4-b7ad-48b2-856f-0f7a79cfe832/app_fixed.py)
