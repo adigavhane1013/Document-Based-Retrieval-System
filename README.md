@@ -1,6 +1,8 @@
-# RAG PDF Chatbot
+# Document-Based Retrieval System
 
-A production-ready RAG (Retrieval-Augmented Generation) chatbot backend built with FastAPI and LangChain that allows multi-document question answering with persistent session management.
+A full-stack RAG application with a React frontend and FastAPI backend for document-grounded question answering.
+The backend ingests PDF documents, stores embeddings in a persistent vector database, and answers queries using retrieved document context.
+Current development focuses on backend improvements.
 ***
 
 ## What This Project Does
