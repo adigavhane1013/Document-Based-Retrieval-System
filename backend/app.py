@@ -1,46 +1,48 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from dotenv import load_dotenv
+import json
 import os
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
-from langchain_classic.chains import RetrievalQA
-from langchain_core.prompts import PromptTemplate
-from langchain_community.document_loaders import PyPDFLoader
-import tempfile
 import shutil
-from typing import Dict, List, Optional
+import tempfile
 import uuid
 from datetime import datetime
-import json
 from pathlib import Path
-from langsmith import Client
+from typing import Dict, List, Optional
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from langchain_classic.chains import RetrievalQA
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.vectorstores import Chroma
+from langchain_core.prompts import PromptTemplate
 from langchain_core.tracers import LangChainTracer
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langsmith import Client
+from pydantic import BaseModel
 
 load_dotenv()
 
 # ---------- Configuration ----------
+
 
 class Config:
     # LLM Settings
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
     OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "mistralai/mixtral-8x7b-instruct")
     TEMPERATURE = float(os.getenv("TEMPERATURE", "0.2"))
-    
+
     # RAG Settings
     CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1024"))
     CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
     TOP_K_RESULTS = int(os.getenv("TOP_K_RESULTS", "5"))
-    
+
     # File Upload Limits
     MAX_FILE_SIZE_MB = 50
-    
+
     # Embedding Model
     EMBEDDING_MODEL = "text-embedding-3-small"
     EMBEDDING_BASE_URL = "https://openrouter.ai/api/v1"
-    
+
     # LangSmith
     LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY")
     LANGCHAIN_TRACING_V2 = os.getenv("LANGCHAIN_TRACING_V2", "false").lower() == "true"
@@ -168,15 +170,15 @@ def rebuild_rag_chain_for_session(session_id: str):
         )
 
         llm = get_llm()
-        
+
         # Create callbacks list for LangSmith
         callbacks = [langchain_tracer] if langchain_tracer else []
-        
+
         rag_chain = RetrievalQA.from_chain_type(
             llm=llm,
             retriever=vectorstore.as_retriever(
                 search_type="similarity_score_threshold",
-                search_kwargs={"k": Config.TOP_K_RESULTS, "score_threshold": 0.4}
+                search_kwargs={"k": Config.TOP_K_RESULTS, "score_threshold": 0.4},
             ),
             return_source_documents=True,
             callbacks=callbacks,
@@ -198,6 +200,7 @@ print(f"✅ Loaded {len(rag_chains)} session(s)\n")
 
 # ---------- Models ----------
 
+
 class QuestionRequest(BaseModel):
     session_id: str
     question: str
@@ -218,39 +221,34 @@ class ChatResponse(BaseModel):
 
 # ---------- Routes ----------
 
+
 @app.get("/")
 def read_root():
     return {
         "message": "RAG Backend API is running",
         "version": "1.0",
         "sessions_loaded": len(chat_sessions),
-        "langsmith_enabled": langchain_tracer is not None
+        "langsmith_enabled": langchain_tracer is not None,
     }
 
 
 @app.post("/upload")
-async def upload_document(
-    file: UploadFile = File(...),
-    session_id: Optional[str] = Form(None)
-):
+async def upload_document(file: UploadFile = File(...), session_id: Optional[str] = Form(None)):
     """
     Upload and process PDF document.
     - If session_id is provided: Add document to existing session.
     - If session_id is None: Create new session.
     """
-    
+
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
-    
+
     file.file.seek(0, 2)
     file_size = file.file.tell()
     file.file.seek(0)
-    
+
     if file_size > Config.MAX_FILE_SIZE_MB * 1024 * 1024:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File too large. Maximum size: {Config.MAX_FILE_SIZE_MB}MB"
-        )
+        raise HTTPException(status_code=400, detail=f"File too large. Maximum size: {Config.MAX_FILE_SIZE_MB}MB")
 
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
@@ -273,7 +271,7 @@ async def upload_document(
             chunk_overlap=Config.CHUNK_OVERLAP,
         )
         chunks = text_splitter.split_documents(documents)
-        
+
         # Add chunk_id to metadata
         for chunk in chunks:
             chunk.metadata["chunk_id"] = str(uuid.uuid4())
@@ -283,37 +281,37 @@ async def upload_document(
         if session_id and session_id in chat_sessions:
             # Add to existing session
             persist_dir = f"./vectorstore/session_{session_id}"
-            
+
             vectorstore = Chroma(
                 embedding_function=embeddings,
                 persist_directory=persist_dir,
             )
             vectorstore.add_documents(chunks)
-            
+
             chat_sessions[session_id]["documents"].append(file.filename)
             chat_sessions[session_id]["documents_count"] = len(chat_sessions[session_id]["documents"])
             chat_sessions[session_id]["pages"] += len(documents)
             chat_sessions[session_id]["chunks"] += len(chunks)
             chat_sessions[session_id]["last_updated"] = datetime.now().isoformat()
-            
+
             llm = get_llm()
             callbacks = [langchain_tracer] if langchain_tracer else []
-            
+
             rag_chain = RetrievalQA.from_chain_type(
                 llm=llm,
                 retriever=vectorstore.as_retriever(
                     search_type="similarity_score_threshold",
-                    search_kwargs={"k": Config.TOP_K_RESULTS, "score_threshold": 0.4}
+                    search_kwargs={"k": Config.TOP_K_RESULTS, "score_threshold": 0.4},
                 ),
                 return_source_documents=True,
                 callbacks=callbacks,
                 chain_type_kwargs={"prompt": QA_CHAIN_PROMPT},
             )
             rag_chains[session_id] = rag_chain
-            
+
             save_sessions_to_disk(chat_sessions)
             os.unlink(tmp_path)
-            
+
             return {
                 "session_id": session_id,
                 "filename": file.filename,
@@ -324,12 +322,12 @@ async def upload_document(
                 "total_chunks": chat_sessions[session_id]["chunks"],
                 "message": f"Added document to existing session. Total: {chat_sessions[session_id]['documents_count']} documents",
             }
-        
+
         else:
             # Create new session
             new_session_id = str(uuid.uuid4())
             persist_dir = f"./vectorstore/session_{new_session_id}"
-            
+
             vectorstore = Chroma.from_documents(
                 documents=chunks,
                 embedding=embeddings,
@@ -338,12 +336,12 @@ async def upload_document(
 
             llm = get_llm()
             callbacks = [langchain_tracer] if langchain_tracer else []
-            
+
             rag_chain = RetrievalQA.from_chain_type(
                 llm=llm,
                 retriever=vectorstore.as_retriever(
                     search_type="similarity_score_threshold",
-                    search_kwargs={"k": Config.TOP_K_RESULTS, "score_threshold": 0.4}
+                    search_kwargs={"k": Config.TOP_K_RESULTS, "score_threshold": 0.4},
                 ),
                 return_source_documents=True,
                 callbacks=callbacks,
@@ -383,10 +381,10 @@ async def upload_document(
 @app.post("/ask", response_model=ChatResponse)
 async def ask_question(request: QuestionRequest):
     """Ask a question about the document(s) in a session with LangSmith tracing."""
-    
+
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
-    
+
     if request.session_id not in rag_chains:
         if request.session_id in chat_sessions:
             rebuild_rag_chain_for_session(request.session_id)
@@ -395,26 +393,28 @@ async def ask_question(request: QuestionRequest):
 
     try:
         rag_chain = rag_chains[request.session_id]
-        
+
         # Pre-generation check: Get relevant documents first
         # Extract the retriever from the chain
         retriever = rag_chain.retriever
         source_docs = retriever.invoke(request.question)
-        
+
         if not source_docs:
             timestamp = datetime.now().isoformat()
             fallback_answer = "I don't know based on the provided documents."
-            
+
             # Store message
-            chat_sessions[request.session_id]["messages"].append({
-                "question": request.question,
-                "answer": fallback_answer,
-                "sources": 0,
-                "timestamp": timestamp,
-            })
+            chat_sessions[request.session_id]["messages"].append(
+                {
+                    "question": request.question,
+                    "answer": fallback_answer,
+                    "sources": 0,
+                    "timestamp": timestamp,
+                }
+            )
             chat_sessions[request.session_id]["last_updated"] = timestamp
             save_sessions_to_disk(chat_sessions)
-            
+
             return ChatResponse(
                 answer=fallback_answer,
                 sources_count=0,
@@ -425,32 +425,31 @@ async def ask_question(request: QuestionRequest):
 
         # Invoke with LangChain tracing
         callbacks = [langchain_tracer] if langchain_tracer else []
-        # Since we use RetrievalQA, it expects 'query' in input for RetrievalQA 
+        # Since we use RetrievalQA, it expects 'query' in input for RetrievalQA
         # but the prompt template now uses 'query' instead of 'question'
-        response = rag_chain.invoke(
-            {"query": request.question},
-            config={"callbacks": callbacks}
-        )
-        
+        response = rag_chain.invoke({"query": request.question}, config={"callbacks": callbacks})
+
         answer = response["result"]
         source_docs = response["source_documents"]
-        
+
         # Extract source info
         sources_info = []
         for doc in source_docs:
             page = doc.metadata.get("page")
             chunk_id = doc.metadata.get("chunk_id")
             sources_info.append(SourceInfo(page=page if page is not None else None, chunk_id=chunk_id))
-        
+
         timestamp = datetime.now().isoformat()
-        
+
         # Store message
-        chat_sessions[request.session_id]["messages"].append({
-            "question": request.question,
-            "answer": answer,
-            "sources": len(source_docs),
-            "timestamp": timestamp,
-        })
+        chat_sessions[request.session_id]["messages"].append(
+            {
+                "question": request.question,
+                "answer": answer,
+                "sources": len(source_docs),
+                "timestamp": timestamp,
+            }
+        )
         chat_sessions[request.session_id]["last_updated"] = timestamp
 
         save_sessions_to_disk(chat_sessions)
@@ -512,7 +511,7 @@ def delete_session(session_id: str):
     """Delete a session and its vector store."""
     if session_id not in chat_sessions:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     try:
         del chat_sessions[session_id]
         if session_id in rag_chains:
@@ -522,11 +521,12 @@ def delete_session(session_id: str):
         save_sessions_to_disk(chat_sessions)
 
         return {"message": "Session deleted successfully"}
-    
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting session: {str(e)}")
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
