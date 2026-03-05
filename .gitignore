@@ -1,0 +1,32 @@
+# Environment variables - never push this
+.env
+
+# Virtual environment
+backend/venv/
+venv/
+
+# Vector store session data (auto-generated, too large)
+backend/vectorstore/
+storage/vectorstore/
+vectorstore/
+
+# Session storage (runtime data)
+backend/storage/sessions.json
+storage/sessions.json
+
+# Python cache
+__pycache__/
+backend/__pycache__/
+src/__pycache__/
+*.pyc
+*.pyo
+
+# Node modules
+frontend/node_modules/
+
+# Sample/test uploads (don't push actual documents)
+sample/
+
+# OS files
+.DS_Store
+Thumbs.db
