@@ -5,13 +5,6 @@ A full-stack AI chatbot that lets you upload PDF documents and ask questions abo
 ![CI](https://github.com/adigavhane1013/Document-Based-Retrieval-System/actions/workflows/ci.yml/badge.svg)
 
 ---
-
-## 📸 Preview
-
-![RAG Chatbot UI](./sample/preview.png)
-
-> Upload a PDF → Ask questions → Get precise, context-grounded answers with source references.
-
 ---
 
 ## ✨ Features
