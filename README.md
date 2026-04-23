@@ -312,3 +312,7 @@ Never commit your `.env` file. Use [GitHub Secrets](https://docs.github.com/en/a
 Please run `black .` and `isort .` before submitting a PR.
 
 ---
+
+## 📄 License
+
+This project is licensed under the MIT License.
