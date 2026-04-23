@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DocMind — AI Document Intelligence</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:ital,wght@0,300;0,400;1,300&family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;1,9..144,300&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0c0c0f; --surface: #13131a; --surface2: #1a1a25; --border: #2a2a3d;
+    --accent: #7c6af7; --accent2: #f7c26a; --text: #e8e8f0; --muted: #6b6b8a;
+    --success: #6af7a8; --danger: #f76a6a; --radius: 14px;
+  }
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: 'Syne', sans-serif; overflow: hidden; }
+  body::before { content:''; position:fixed; inset:0; z-index:0; background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E"); pointer-events:none; }
+  body::after { content:''; position:fixed; top:-30%; left:-10%; width:60vw; height:60vw; background:radial-gradient(circle,rgba(124,106,247,0.08) 0%,transparent 70%); pointer-events:none; z-index:0; }
+  .app { display:grid; grid-template-columns:320px 1fr; height:100vh; position:relative; z-index:1; }
+
+  /* Sidebar */
+  .sidebar { background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden; }
+  .logo { padding:28px 24px 20px; border-bottom:1px solid var(--border); }
+  .logo-mark { font-family:'Fraunces',serif; font-size:22px; font-weight:300; letter-spacing:-0.5px; }
+  .logo-mark span { color:var(--accent); font-style:italic; }
+  .logo-sub { font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:2px; text-transform:uppercase; margin-top:4px; }
+  .upload-zone { margin:20px 16px; border:1.5px dashed var(--border); border-radius:var(--radius); padding:24px 16px; text-align:center; cursor:pointer; transition:all 0.25s; position:relative; overflow:hidden; }
+  .upload-zone:hover, .upload-zone.drag-over { border-color:var(--accent); background:rgba(124,106,247,0.06); }
+  .upload-zone input { position:absolute; inset:0; opacity:0; cursor:pointer; }
+  .upload-icon { width:40px; height:40px; margin:0 auto 12px; background:linear-gradient(135deg,var(--accent),#a855f7); border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:18px; }
+  .upload-title { font-size:13px; font-weight:600; margin-bottom:4px; }
+  .upload-sub { font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); }
+  .upload-progress { margin:0 16px 12px; display:none; }
+  .upload-progress.active { display:block; }
+  .progress-label { font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); margin-bottom:6px; display:flex; justify-content:space-between; }
+  .progress-bar { height:3px; background:var(--border); border-radius:2px; overflow:hidden; }
+  .progress-fill { height:100%; background:linear-gradient(90deg,var(--accent),var(--accent2)); border-radius:2px; width:0%; transition:width 0.3s; }
+  .sessions-label { padding:0 20px 10px; font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:1.5px; text-transform:uppercase; }
+  .sessions-list { flex:1; overflow-y:auto; padding:0 12px; }
+  .sessions-list::-webkit-scrollbar { width:4px; }
+  .sessions-list::-webkit-scrollbar-thumb { background:var(--border); border-radius:2px; }
+  .session-card { padding:12px 14px; border-radius:10px; cursor:pointer; margin-bottom:6px; border:1px solid transparent; transition:all 0.2s; position:relative; }
+  .session-card:hover { background:var(--surface2); border-color:var(--border); }
+  .session-card.active { background:rgba(124,106,247,0.1); border-color:rgba(124,106,247,0.3); }
+  .session-card.active::before { content:''; position:absolute; left:0; top:20%; bottom:20%; width:2px; background:var(--accent); border-radius:1px; }
+  .session-name { font-size:12px; font-weight:600; margin-bottom:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .session-meta { font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); display:flex; gap:8px; }
+  .session-delete { position:absolute; right:10px; top:50%; transform:translateY(-50%); opacity:0; background:none; border:none; color:var(--danger); cursor:pointer; font-size:14px; transition:opacity 0.2s; padding:4px; }
+  .session-card:hover .session-delete { opacity:1; }
+  .empty-sessions { text-align:center; padding:30px 20px; font-family:'DM Mono',monospace; font-size:11px; color:var(--muted); }
+  .status-bar { padding:12px 20px; border-top:1px solid var(--border); font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); display:flex; align-items:center; gap:8px; }
+  .status-dot { width:6px; height:6px; border-radius:50%; background:var(--success); animation:pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+  /* Main panel */
+  .main { display:flex; flex-direction:column; overflow:hidden; }
+  .empty-state { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; padding:40px; text-align:center; }
+  .empty-glyph { font-family:'Fraunces',serif; font-size:72px; font-weight:300; color:var(--border); line-height:1; }
+  .empty-title { font-family:'Fraunces',serif; font-size:28px; font-weight:300; color:var(--muted); }
+  .empty-sub { font-family:'DM Mono',monospace; font-size:12px; color:var(--border); max-width:300px; line-height:1.8; }
+
+  /* Tab bar */
+  .tab-bar { display:flex; border-bottom:1px solid var(--border); background:var(--surface); }
+  .tab-btn { padding:14px 24px; font-family:'DM Mono',monospace; font-size:11px; letter-spacing:1px; text-transform:uppercase; border:none; background:none; color:var(--muted); cursor:pointer; border-bottom:2px solid transparent; transition:all 0.2s; }
+  .tab-btn:hover { color:var(--text); }
+  .tab-btn.active { color:var(--accent); border-bottom-color:var(--accent); }
+
+  /* Chat */
+  .chat-header { padding:16px 40px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; }
+  .chat-header-info h2 { font-size:16px; font-weight:700; }
+  .chat-header-info p { font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); margin-top:2px; }
+  .grounding-badge { font-family:'DM Mono',monospace; font-size:10px; padding:4px 10px; border-radius:20px; border:1px solid var(--border); color:var(--muted); }
+  .chat-area { flex:1; overflow-y:auto; padding:32px 40px; display:flex; flex-direction:column; gap:24px; }
+  .chat-area::-webkit-scrollbar { width:4px; }
+  .chat-area::-webkit-scrollbar-thumb { background:var(--border); border-radius:2px; }
+  .msg { display:flex; flex-direction:column; gap:6px; animation:fadeUp 0.3s ease; }
+  @keyframes fadeUp { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
+  .msg-user { align-items:flex-end; }
+  .msg-ai   { align-items:flex-start; }
+  .msg-bubble { max-width:72%; padding:14px 18px; border-radius:14px; font-size:14px; line-height:1.7; }
+  .msg-user .msg-bubble { background:linear-gradient(135deg,var(--accent),#9f7aea); color:white; border-bottom-right-radius:4px; }
+  .msg-ai .msg-bubble { background:var(--surface2); border:1px solid var(--border); border-bottom-left-radius:4px; font-family:'DM Mono',monospace; font-size:13px; }
+  .msg-refused .msg-bubble { border-color:rgba(247,106,106,0.3); background:rgba(247,106,106,0.05); }
+  .msg-meta { font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); display:flex; align-items:center; gap:10px; padding:0 4px; }
+  .score-pill { padding:2px 8px; border-radius:10px; font-size:10px; }
+  .score-high { background:rgba(106,247,168,0.1); color:var(--success); border:1px solid rgba(106,247,168,0.2); }
+  .score-mid  { background:rgba(247,194,106,0.1); color:var(--accent2); border:1px solid rgba(247,194,106,0.2); }
+  .score-low  { background:rgba(247,106,106,0.1); color:var(--danger);  border:1px solid rgba(247,106,106,0.2); }
+  .sources-toggle { background:none; border:1px solid var(--border); color:var(--muted); border-radius:6px; padding:2px 8px; font-size:10px; font-family:'DM Mono',monospace; cursor:pointer; transition:all 0.2s; }
+  .sources-toggle:hover { border-color:var(--accent); color:var(--accent); }
+  .sources-panel { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:12px 14px; max-width:72%; margin-left:4px; }
+  .source-item { font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); padding:4px 0; border-bottom:1px solid var(--border); display:flex; gap:8px; }
+  .source-item:last-child { border-bottom:none; }
+  .source-chunk { color:var(--accent); }
+  .thinking { display:flex; align-items:center; gap:10px; padding:14px 18px; background:var(--surface2); border:1px solid var(--border); border-radius:14px; border-bottom-left-radius:4px; max-width:200px; }
+  .thinking-dots { display:flex; gap:4px; }
+  .thinking-dot { width:6px; height:6px; border-radius:50%; background:var(--accent); animation:blink 1.2s infinite; }
+  .thinking-dot:nth-child(2){animation-delay:0.2s} .thinking-dot:nth-child(3){animation-delay:0.4s}
+  @keyframes blink { 0%,80%,100%{opacity:0.2} 40%{opacity:1} }
+  .thinking-label { font-family:'DM Mono',monospace; font-size:11px; color:var(--muted); }
+  .input-area { padding:20px 40px 28px; border-top:1px solid var(--border); }
+  .input-wrap { display:flex; gap:12px; align-items:flex-end; background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); padding:12px 16px; transition:border-color 0.2s; }
+  .input-wrap:focus-within { border-color:var(--accent); }
+  textarea { flex:1; background:none; border:none; outline:none; color:var(--text); font-family:'Syne',sans-serif; font-size:14px; resize:none; min-height:24px; max-height:120px; line-height:1.6; }
+  textarea::placeholder { color:var(--muted); }
+  .send-btn { width:36px; height:36px; border-radius:8px; flex-shrink:0; background:linear-gradient(135deg,var(--accent),#9f7aea); border:none; cursor:pointer; color:white; display:flex; align-items:center; justify-content:center; transition:all 0.2s; font-size:16px; }
+  .send-btn:hover { transform:scale(1.05); box-shadow:0 0 20px rgba(124,106,247,0.4); }
+  .send-btn:disabled { opacity:0.4; cursor:not-allowed; transform:none; box-shadow:none; }
+  .input-hint { font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); margin-top:8px; text-align:center; }
+
+  /* Toast */
+  .toast { position:fixed; bottom:24px; right:24px; z-index:999; background:var(--surface2); border:1px solid var(--border); border-radius:10px; padding:12px 18px; font-family:'DM Mono',monospace; font-size:12px; animation:slideIn 0.3s ease; max-width:300px; }
+  .toast.error   { border-color:rgba(247,106,106,0.4); color:var(--danger); }
+  .toast.success { border-color:rgba(106,247,168,0.4); color:var(--success); }
+  @keyframes slideIn { from{transform:translateX(20px);opacity:0} to{transform:translateX(0);opacity:1} }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-mark">Doc<span>Mind</span></div>
+      <div class="logo-sub">AI Document Intelligence</div>
+    </div>
+    <div class="upload-zone" id="uploadZone">
+      <input type="file" id="fileInput" accept=".pdf,.txt,.md,.docx" multiple>
+      <div class="upload-icon">📄</div>
+      <div class="upload-title">Drop document here</div>
+      <div class="upload-sub">PDF · TXT · MD · DOCX</div>
+    </div>
+    <div class="upload-progress" id="uploadProgress">
+      <div class="progress-label"><span id="progressLabel">Uploading...</span><span id="progressPct">0%</span></div>
+      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    </div>
+    <div class="sessions-label">Sessions</div>
+    <div class="sessions-list" id="sessionsList">
+      <div class="empty-sessions">No documents yet.<br>Upload one to begin.</div>
+    </div>
+    <div class="status-bar">
+      <div class="status-dot"></div>
+      <span id="statusText">API connected · localhost:8000</span>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main" id="mainPanel">
+
+    <!-- Empty state -->
+    <div class="empty-state" id="emptyState">
+      <div class="empty-glyph">∴</div>
+      <div class="empty-title">No document selected</div>
+      <div class="empty-sub">Upload a document from the sidebar, then ask anything about it.</div>
+    </div>
+
+    <!-- Chat view -->
+    <div id="chatView" class="hidden" style="display:flex;flex-direction:column;height:100%;overflow:hidden;">
+
+      <!-- Chat panel -->
+      <div id="panelChat" style="display:flex;flex-direction:column;flex:1;overflow:hidden;">
+        <div class="chat-header">
+          <div class="chat-header-info">
+            <h2 id="chatTitle">Document</h2>
+            <p id="chatMeta">0 chunks · 0 messages</p>
+          </div>
+          <div class="grounding-badge" id="groundingBadge">Grounding: —</div>
+        </div>
+        <div class="chat-area" id="chatArea"></div>
+        <div class="input-area">
+          <div class="input-wrap">
+            <textarea id="questionInput" placeholder="Ask anything about your document..." rows="1"></textarea>
+            <button class="send-btn" id="sendBtn">↑</button>
+          </div>
+          <div class="input-hint">Enter to send · Shift+Enter for new line</div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<script>
+const API = 'http://localhost:8000';
+let currentSessionId = null;
+let sessions = {};
+
+// ── API ───────────────────────────────────────────────────────────────────────
+async function apiFetch(path, opts={}) {
+  const r = await fetch(API+path, opts);
+  if (!r.ok) { const e=await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail||r.statusText); }
+  return r.json();
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function toast(msg, type='success') {
+  const el=document.createElement('div'); el.className=`toast ${type}`; el.textContent=msg;
+  document.body.appendChild(el); setTimeout(()=>el.remove(),3500);
+}
+
+// ── Sessions ──────────────────────────────────────────────────────────────────
+async function loadSessions() {
+  try {
+    const data = await apiFetch('/sessions');
+    sessions={};
+    data.sessions.forEach(s=>sessions[s.session_id]=s);
+    renderSessions();
+  } catch(e) {
+    document.getElementById('statusText').textContent='Cannot reach API · is the server running?';
+  }
+}
+
+function renderSessions() {
+  const list=document.getElementById('sessionsList');
+  const ids=Object.keys(sessions);
+  if (!ids.length) { list.innerHTML='<div class="empty-sessions">No documents yet.<br>Upload one to begin.</div>'; return; }
+  list.innerHTML=ids.map(id=>{
+    const s=sessions[id];
+    const name=(s.documents&&s.documents[0])||'Document';
+    return `<div class="session-card ${id===currentSessionId?'active':''}" onclick="selectSession('${id}')">
+      <div class="session-name" title="${name}">${name}</div>
+      <div class="session-meta"><span>${s.chunks||0} chunks</span><span>${s.message_count||0} msgs</span></div>
+      <button class="session-delete" onclick="deleteSession(event,'${id}')">✕</button>
+    </div>`;
+  }).join('');
+}
+
+async function selectSession(id) {
+  currentSessionId=id; renderSessions();
+  document.getElementById('emptyState').classList.add('hidden');
+  const cv=document.getElementById('chatView'); cv.classList.remove('hidden'); cv.style.display='flex';
+  const s=sessions[id];
+  document.getElementById('chatTitle').textContent=(s.documents&&s.documents[0])||'Document';
+  document.getElementById('chatMeta').textContent=`${s.chunks||0} chunks · ${s.message_count||0} messages`;
+  document.getElementById('chatArea').innerHTML='';
+  document.getElementById('groundingBadge').textContent='Grounding: —';
+  try {
+    const detail=await apiFetch(`/session/${id}`);
+    (detail.messages||[]).forEach(m=>{
+      appendMessage('user',m.question);
+      appendMessage('ai',m.answer,m.grounding_score??null,m.refused,[]);
+    });
+  } catch(e){}
+  scrollChat();
+}
+
+async function deleteSession(e,id) {
+  e.stopPropagation();
+  try {
+    await apiFetch(`/session/${id}`,{method:'DELETE'});
+    delete sessions[id];
+    if (currentSessionId===id) { currentSessionId=null; document.getElementById('emptyState').classList.remove('hidden'); document.getElementById('chatView').classList.add('hidden'); }
+    renderSessions(); toast('Session deleted');
+  } catch(err){toast(err.message,'error');}
+}
+
+// ── Upload ────────────────────────────────────────────────────────────────────
+const uploadZone=document.getElementById('uploadZone');
+const fileInput=document.getElementById('fileInput');
+uploadZone.addEventListener('dragover',e=>{e.preventDefault();uploadZone.classList.add('drag-over');});
+uploadZone.addEventListener('dragleave',()=>uploadZone.classList.remove('drag-over'));
+uploadZone.addEventListener('drop',e=>{e.preventDefault();uploadZone.classList.remove('drag-over');if(e.dataTransfer.files.length)handleUpload(e.dataTransfer.files[0]);});
+fileInput.addEventListener('change',()=>{if(fileInput.files.length)handleUpload(fileInput.files[0]);});
+
+async function handleUpload(file) {
+  const progress=document.getElementById('uploadProgress'),fill=document.getElementById('progressFill'),label=document.getElementById('progressLabel'),pct=document.getElementById('progressPct');
+  progress.classList.add('active'); label.textContent=file.name;
+  let p=0; const ticker=setInterval(()=>{p=Math.min(p+Math.random()*15,85);fill.style.width=p+'%';pct.textContent=Math.round(p)+'%';},200);
+  try {
+    const fd=new FormData(); fd.append('file',file);
+    if(currentSessionId) fd.append('session_id',currentSessionId);
+    const result=await apiFetch('/upload',{method:'POST',body:fd});
+    clearInterval(ticker); fill.style.width='100%'; pct.textContent='100%';
+    setTimeout(()=>{progress.classList.remove('active');fill.style.width='0%';},800);
+    toast(`✓ ${file.name} · ${result.chunks} chunks indexed`,'success');
+    await loadSessions(); selectSession(result.session_id); fileInput.value='';
+  } catch(err){clearInterval(ticker);progress.classList.remove('active');fill.style.width='0%';toast(err.message,'error');}
+}
+
+// ── Chat ──────────────────────────────────────────────────────────────────────
+function appendMessage(role,text,groundingScore=null,refused=false,sources=[]) {
+  const area=document.getElementById('chatArea');
+  const wrap=document.createElement('div');
+  wrap.className=`msg msg-${role}${refused?' msg-refused':''}`;
+  if(role==='user'){
+    wrap.innerHTML=`<div class="msg-bubble">${escHtml(text)}</div>`;
+  } else {
+    const formatted=escHtml(text).replace(/\[SOURCE:([a-zA-Z0-9_\-]+)\]/g,'<span style="color:var(--accent);font-size:10px">[src:$1]</span>');
+    let scorePill='';
+    if(groundingScore!==null){const cls=groundingScore>=0.8?'score-high':groundingScore>=0.5?'score-mid':'score-low';scorePill=`<span class="score-pill ${cls}">ground ${Math.round(groundingScore*100)}%</span>`;}
+    const srcBtn=sources.length?`<button class="sources-toggle" onclick="toggleSources(this)">sources (${sources.length})</button>`:'';
+    const srcPanel=sources.length?`<div class="sources-panel hidden">${sources.map(s=>`<div class="source-item"><span class="source-chunk">${s.chunk_id||'—'}</span><span>${s.source||''}</span><span>p.${s.page??'?'}</span></div>`).join('')}</div>`:'';
+    wrap.innerHTML=`<div class="msg-bubble">${formatted}</div><div class="msg-meta">${scorePill}${srcBtn}</div>${srcPanel}`;
+  }
+  area.appendChild(wrap); scrollChat();
+}
+
+function toggleSources(btn){const panel=btn.closest('.msg').querySelector('.sources-panel');if(panel)panel.classList.toggle('hidden');}
+function showThinking(){const area=document.getElementById('chatArea');const el=document.createElement('div');el.className='msg msg-ai';el.id='thinkingMsg';el.innerHTML=`<div class="thinking"><div class="thinking-dots"><div class="thinking-dot"></div><div class="thinking-dot"></div><div class="thinking-dot"></div></div><span class="thinking-label">Thinking…</span></div>`;area.appendChild(el);scrollChat();}
+function hideThinking(){document.getElementById('thinkingMsg')?.remove();}
+function scrollChat(){const area=document.getElementById('chatArea');area.scrollTop=area.scrollHeight;}
+function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');}
+
+async function sendQuestion() {
+  const input=document.getElementById('questionInput');
+  const q=input.value.trim();
+  if(!q||!currentSessionId) return;
+  const sendBtn=document.getElementById('sendBtn');
+  sendBtn.disabled=true; input.value=''; input.style.height='auto';
+  appendMessage('user',q); showThinking();
+  try {
+    const result=await apiFetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:currentSessionId,question:q})});
+    hideThinking();
+    appendMessage('ai',result.answer,result.grounding_score,result.refused,result.sources||[]);
+    const score=result.grounding_score;
+    const badge=document.getElementById('groundingBadge');
+    badge.textContent=`Grounding: ${Math.round(score*100)}%`;
+    badge.style.color=score>=0.8?'var(--success)':score>=0.5?'var(--accent2)':'var(--danger)';
+    badge.style.borderColor=score>=0.8?'rgba(106,247,168,0.3)':score>=0.5?'rgba(247,194,106,0.3)':'rgba(247,106,106,0.3)';
+    sessions[currentSessionId].message_count=(sessions[currentSessionId].message_count||0)+1;
+    document.getElementById('chatMeta').textContent=`${sessions[currentSessionId].chunks||0} chunks · ${sessions[currentSessionId].message_count} messages`;
+    renderSessions();
+  } catch(err){hideThinking();appendMessage('ai',`Error: ${err.message}`,0,true,[]);toast(err.message,'error');}
+  sendBtn.disabled=false; input.focus();
+}
+
+document.getElementById('questionInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendQuestion();}});
+document.getElementById('sendBtn').addEventListener('click',sendQuestion);
+document.getElementById('questionInput').addEventListener('input',function(){this.style.height='auto';this.style.height=Math.min(this.scrollHeight,120)+'px';});
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+loadSessions();
+setInterval(loadSessions, 30000);
+</script>
+</body>
+</html>

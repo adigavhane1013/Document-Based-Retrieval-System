@@ -1,0 +1,50 @@
+@"
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Environment variables
+.env
+
+# ChromaDB session data
+vectorstore/session_*
+
+# Logs
+logs/
+*.log
+
+# Storage runtime data
+storage/
+
+# Ignore full vectorstore
+vectorstore/
+
+# Ignore debug scripts
+debug_*.py
+quick_diagnostics.py
+
+
+# Backup files
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Pytest cache
+.pytest_cache/
+.coverage
+htmlcov/
+"@ | Out-File -FilePath "$dst\.gitignore" -Encoding UTF8
