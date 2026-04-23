@@ -1,0 +1,107 @@
+name: DocMind CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+
+  # ──────────────────────────────────────────────
+  # JOB 1: Lint
+  # ──────────────────────────────────────────────
+  lint:
+    name: 🔍 Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install lint tools
+        run: pip install black isort flake8
+
+      - name: Black — code formatting
+        run: black --check .
+
+      - name: isort — import ordering
+        run: isort --check-only .
+
+      - name: Flake8 — style + errors
+        run: flake8 . --max-line-length=100 --exclude=.venv,__pycache__,.pytest_cache
+
+  # ──────────────────────────────────────────────
+  # JOB 2: Tests
+  # ──────────────────────────────────────────────
+  test:
+    name: 🧪 Tests
+    runs-on: ubuntu-latest
+    needs: lint
+
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run tests with coverage
+        run: |
+          python -m pytest tests/ -v \
+            --cov=. \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-omit=".venv/*,__pycache__/*"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  # ──────────────────────────────────────────────
+  # JOB 3: Security Scan
+  # ──────────────────────────────────────────────
+  security:
+    name: 🔒 Security Scan
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install security tools
+        run: pip install bandit safety
+
+      - name: Bandit — code security scan
+        run: |
+          bandit -r . \
+            --exclude .venv,tests \
+            --severity-level medium \
+            -f txt
+
+      - name: Safety — dependency vulnerability scan
+        run: safety check -r requirements.txt
