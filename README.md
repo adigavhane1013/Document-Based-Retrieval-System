@@ -1,8 +1,21 @@
-# 🤖 DocMind — Production-Grade Document Retrieval System
+# 🤖 DocMind — Production-Grade Retrieval-Augmented Generation (RAG) System
 
-A production-grade RAG system that lets you upload documents and ask questions about them. Built with **FastAPI**, **ChromaDB**, **Groq (Llama-3.3-70b)**, and **Ollama local embeddings** with hybrid dense + BM25 retrieval, cross-encoder reranking, and RAGAS-based quality guardrails.
+A production-grade RAG system that lets you upload documents and ask grounded questions about them. Built with **FastAPI**, **LangChain**, **ChromaDB**, **HuggingFace Embeddings (BAAI/bge-small-en-v1.5)**, **Groq (Llama-3.3-70b-versatile)**, **Hybrid Dense + BM25 Retrieval**, **Cross-Encoder Reranking**, **Grounding Verification**, and **On-Demand RAGAS Evaluation**.
 
 ![CI](https://github.com/adigavhane1013/Document-Based-Retrieval-System/actions/workflows/ci.yml/badge.svg)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688)
+![LangChain](https://img.shields.io/badge/LangChain-1C3C3C)
+![ChromaDB](https://img.shields.io/badge/ChromaDB-FF6B6B)
+![HuggingFace](https://img.shields.io/badge/HuggingFace-FFD21E)
+![Groq](https://img.shields.io/badge/Groq-F55036)
+
+---
+
+## 📖 Project Overview
+
+DocMind lets you upload PDF and DOCX documents and ask natural-language questions about their content. Answers are grounded strictly in the retrieved document chunks, returned alongside the source chunks used and a grounding score. Answer quality can optionally be evaluated on demand using RAGAS metrics (Faithfulness, Answer Relevancy, Hallucination Rate).
 
 ---
 
@@ -12,15 +25,109 @@ A production-grade RAG system that lets you upload documents and ask questions a
 - 💬 **Context-Aware Q&A** — Answers strictly grounded in your uploaded documents
 - 🔍 **Hybrid Retrieval** — Dense (ChromaDB) + Sparse (BM25) retrieval with cross-encoder reranking
 - 🧠 **Query Rewriting** — Automatic ambiguity detection and LLM-based query optimization
-- ✅ **Quality Guardrails** — RAGAS Decision Layer with Accept / Retry / Fallback / Reject logic
-- 📊 **RAGAS Evaluation** — Automated Faithfulness and Answer Relevancy scoring per query
-- 🔒 **Hallucination Filtering** — Guardrails to detect and filter hallucinated content
-- 🗂️ **Multi-Session Support** — Each session has its own isolated vector store
+- 🗂️ **Session Isolation** — Each uploaded document gets its own isolated vector store
+- 📌 **Source Citations** — Answers reference the retrieved chunks they came from
+- 📈 **Grounding Score** — Each answer is returned with a grounding score
+- 🧪 **Optional RAGAS Evaluation** — On-demand Faithfulness, Answer Relevancy, and Hallucination Rate scoring
+- ⚡ **Evaluation Caching** — Avoids redundant evaluation calls for repeated queries
+- 🪵 **Structured Logging** — Custom structured logger for observability
+- 🧩 **Decision Layer** — Automatically determines whether to Accept, Retry, Fallback, or Reject an answer based on quality thresholds
 - 🖥️ **Web UI** — Browser-based interface via `docmind_ui.html`
 
 ---
 
-## 🏗️ Project Structure
+## 🌟 Key Highlights
+
+- Hybrid Dense + Sparse Retrieval
+- Cross-Encoder Reranking
+- Automatic Query Rewriting
+- Session-Isolated Vector Stores
+- Grounding Verification
+- Optional RAGAS Evaluation
+- Evaluation Caching
+- 62 Unit Tests
+
+---
+
+## 🏗️ Architecture
+
+```
+User uploads PDF / DOCX
+        │
+        ▼
+Loader parses document (pdfplumber / python-docx)
+        │
+        ▼
+Chunking (chunk_size=1024, overlap=256)
+        │
+        ▼
+HuggingFace Embeddings (BAAI/bge-small-en-v1.5)
+        │
+        ▼
+ChromaDB stores vectors (persisted per session)
+        │
+        ▼
+User asks a question
+        │
+        ▼
+Query Rewriter — detects ambiguity, rewrites query via LLM
+        │
+        ▼
+Hybrid Retrieval — Dense (ChromaDB) + Sparse (BM25) merged
+        │
+        ▼
+Cross-Encoder Reranker — rescores top candidates
+        │
+        ▼
+Groq llama-3.3-70b generates grounded answer + citations
+        │
+        ▼
+Grounding Analysis
+        │
+        ▼
+Grounding Score
+        │
+        ▼
+(Optional) RAGAS Evaluation
+  ├── Faithfulness
+  ├── Answer Relevancy
+  └── Hallucination Rate
+        │
+        ▼
+Answer + sources + grounding score returned
+```
+
+---
+
+## 📸 Screenshots
+
+> _Add screenshots of the UI here._
+
+| Upload | Q&A | Evaluation |
+|---|---|---|
+| _placeholder_ | _placeholder_ | _placeholder_ |
+
+---
+
+## 🧰 Tech Stack
+
+| Layer | Technology |
+|---|---|
+| **UI** | HTML/CSS/JS (`docmind_ui.html`) |
+| **Backend** | FastAPI, Uvicorn |
+| **LLM** | Groq — `llama-3.3-70b-versatile` |
+| **Embeddings** | HuggingFace — `BAAI/bge-small-en-v1.5` |
+| **Orchestration** | LangChain |
+| **Vector Store** | ChromaDB (persisted per session) |
+| **Sparse Retrieval** | BM25 |
+| **Reranker** | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
+| **Evaluation** | RAGAS (Faithfulness, Answer Relevancy, Hallucination Rate) |
+| **Observability** | Custom structured logger |
+| **CI** | GitHub Actions |
+
+---
+
+## 🏗️ Folder Structure
 
 ```
 rag_production/
@@ -31,7 +138,7 @@ rag_production/
 │
 ├── embeddings/
 │   ├── __init__.py
-│   └── embedding_model.py               # Ollama nomic-embed-text wrapper
+│   └── embedding_model.py               # HuggingFace BAAI/bge-small-en-v1.5 wrapper
 │
 ├── evaluation/
 │   ├── __init__.py
@@ -82,39 +189,18 @@ rag_production/
 ├── .env
 ├── docmind_ui.html                      # Web UI interface
 ├── main.py                              # FastAPI application + REST endpoints
-├── ollama_models.txt                    # Available Ollama models reference
 ├── requirements.txt
 └── README.md
 ```
 
 ---
 
-## 🧰 Tech Stack
-
-| Layer | Technology |
-|---|---|
-| **UI** | HTML/CSS/JS (`docmind_ui.html`) |
-| **Backend** | FastAPI, Uvicorn |
-| **LLM** | Groq — `llama-3.3-70b-versatile` |
-| **Embeddings** | Ollama — `nomic-embed-text` (local) |
-| **Vector Store** | ChromaDB (persisted per session) |
-| **Sparse Retrieval** | BM25 |
-| **Reranker** | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
-| **Evaluation** | RAGAS (Faithfulness + Answer Relevancy) |
-| **Observability** | Custom structured logger |
-| **CI** | GitHub Actions |
-
----
-
-## 🚀 Getting Started
+## 🚀 Installation
 
 ### Prerequisites
 
 - Python 3.10+
-- [Ollama](https://ollama.com) running locally with `nomic-embed-text` pulled
 - A [Groq](https://console.groq.com) API key (free tier available)
-
----
 
 ### 1. Clone the repo
 
@@ -136,13 +222,11 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Pull the embedding model
+> HuggingFace embeddings (`BAAI/bge-small-en-v1.5`) are downloaded automatically on first run — no separate pull step is required.
 
-```bash
-ollama pull nomic-embed-text
-```
+---
 
-### 4. Configure environment variables
+## ⚙️ Configuration
 
 Create a `.env` file at the project root:
 
@@ -166,16 +250,20 @@ RAGAS_MAX_RETRY_ATTEMPTS=2
 RAGAS_FALLBACK_ENABLED=true
 ```
 
-### 5. Start the backend
+---
+
+## ▶️ Running the Project
+
+### Start the backend
 
 ```bash
 uvicorn main:app --reload --port 8000
 ```
 
-Backend will be live at: `http://localhost:8000`  
+Backend will be live at: `http://localhost:8000`
 API docs at: `http://localhost:8000/docs`
 
-### 6. Open the UI
+### Open the UI
 
 Open `docmind_ui.html` directly in your browser.
 
@@ -188,6 +276,7 @@ Open `docmind_ui.html` directly in your browser.
 | `GET` | `/` | Health check |
 | `POST` | `/upload` | Upload a PDF/DOCX document |
 | `POST` | `/ask` | Ask a question against uploaded documents |
+| `POST` | `/evaluate` | Run on-demand RAGAS evaluation on a previously generated answer (by `trace_id`) |
 | `GET` | `/sessions` | List all sessions |
 | `GET` | `/session/{id}` | Get session + chat history |
 | `DELETE` | `/session/{id}` | Delete a session and its vector store |
@@ -207,55 +296,61 @@ curl -X POST http://localhost:8000/ask \
   -d '{"session_id": "your-session-id", "question": "What are the key findings?"}'
 ```
 
----
+### Example: Evaluate an answer
 
-## ⚙️ How It Works
-
-```
-User uploads PDF / DOCX
-        │
-        ▼
-Loader parses document (pdfplumber / python-docx)
-        │
-        ▼
-RecursiveCharacterTextSplitter chunks text
-(chunk_size=1024, overlap=256)
-        │
-        ▼
-Ollama nomic-embed-text generates embeddings (local)
-        │
-        ▼
-ChromaDB stores vectors (persisted to ./vectorstore/session_{id}/)
-        │
-        ▼
-User asks a question
-        │
-        ▼
-Query Rewriting Layer — detects ambiguity, rewrites query via LLM
-        │
-        ▼
-Hybrid Retrieval — Dense (ChromaDB) + Sparse (BM25) merged (alpha=0.7)
-        │
-        ▼
-Cross-Encoder Reranker — rescores top candidates (threshold=0.45, top-k=5)
-        │
-        ▼
-Groq llama-3.3-70b generates answer from retrieved context
-        │
-        ▼
-RAGAS Decision Layer evaluates answer quality
-  ├── ACCEPT  → return answer (faithfulness ≥ 0.70, relevancy ≥ 0.65)
-  ├── RETRY   → fetch more context and regenerate
-  ├── FALLBACK → use better model if available
-  └── REJECT  → max retries exceeded, return graceful degradation
-        │
-        ▼
-Answer + decision metadata returned
+```bash
+curl -X POST http://localhost:8000/evaluate \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "your-session-id", "trace_id": "trace-id-from-ask-response"}'
 ```
 
 ---
 
-## 🧪 Running Tests
+## 🔄 End-to-End Workflow
+
+```
+Upload
+  ↓
+Chunking
+  ↓
+HuggingFace Embeddings
+  ↓
+ChromaDB
+  ↓
+Query Rewriter
+  ↓
+Hybrid Retrieval
+  ↓
+Cross-Encoder Reranker
+  ↓
+LLM
+  ↓
+Grounding Analysis
+  ↓
+Grounding Score
+  ↓
+(Optional Evaluation)
+  ↓
+Faithfulness · Answer Relevancy · Hallucination Rate
+```
+
+---
+
+## 🧪 Evaluation Pipeline
+
+Evaluation is **on-demand**, triggered via `POST /evaluate` against a previously generated answer (identified by `session_id` and `trace_id`), and is not run automatically on every query.
+
+| Metric | Description |
+|---|---|
+| **Faithfulness** | Measures whether the answer is grounded in the retrieved context |
+| **Answer Relevancy** | Measures whether the answer addresses the question asked |
+| **Hallucination Rate** | Measures the proportion of unsupported claims in the answer |
+
+Evaluation results are cached to avoid redundant scoring of repeated question/answer pairs.
+
+---
+
+## 🧪 Testing
 
 ```bash
 # Activate virtual environment first
@@ -275,9 +370,7 @@ python -m pytest tests/test_decision_layer.py -v   # 28 tests
 
 **Current Status: 62/62 tests passing ✅**
 
----
-
-## 🔄 CI Pipeline
+### CI Pipeline
 
 Every push and pull request automatically runs:
 
@@ -286,6 +379,12 @@ Every push and pull request automatically runs:
 | 🔍 Backend Lint | Black, isort, Flake8 |
 | 🧪 Backend Tests | pytest — 62 tests with coverage |
 | 🔒 Security Scan | Bandit (code) + Safety (dependencies) |
+
+---
+
+## 🪵 Logging
+
+Structured logging is handled by `observability/logger.py` and written to `logs/rag.log`. Logs capture pipeline stage events (chunking, retrieval, reranking, generation, evaluation) for debugging and observability.
 
 ---
 
@@ -299,6 +398,18 @@ The following are excluded from the repository via `.gitignore`:
 - `logs/` — runtime logs
 
 Never commit your `.env` file. Use [GitHub Secrets](https://docs.github.com/en/actions/security-guides/encrypted-secrets) for CI.
+
+---
+
+## 🛠️ Future Improvements
+
+- Authentication for multi-user usage
+- Streaming responses in the UI
+- Additional document format support
+- Benchmark dataset for retrieval/answer quality
+- Evaluation dashboard for RAGAS metrics
+- Multi-document retrieval (cross-session querying)
+- Production deployment (Docker, cloud hosting)
 
 ---
 
