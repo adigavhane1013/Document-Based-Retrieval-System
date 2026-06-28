@@ -41,14 +41,20 @@ class Settings(BaseSettings):
     RAGAS_EVAL_MODEL: str = "llama-3.3-70b-versatile"
     RAGAS_API_BASE: str = "https://api.groq.com/openai/v1"
     RAGAS_MAX_TOKENS: int = 1024
-    RAGAS_MAX_CONTEXTS: int = 3
-    RAGAS_CONTEXT_MAX_CHARS: int = 500
+    # NOTE: CHUNK_SIZE below is in TOKENS (~1024 tokens ≈ 4000-4500 chars for
+    # English text). RAGAS_CONTEXT_MAX_CHARS must be large enough to cover a
+    # full chunk, or RAGAS silently evaluates faithfulness against a truncated
+    # fragment while the hallucination filter (guardrails/hallucination_filter.py)
+    # still checks citations against the FULL chunk — producing contradictory
+    # scores (e.g. grounding=100% but faithfulness=0.0) for the exact same answer.
+    RAGAS_MAX_CONTEXTS: int = 10        # was 3 — now matches TOP_K_RERANK below
+    RAGAS_CONTEXT_MAX_CHARS: int = 4500 # was 500 — now covers a full ~1024-token chunk
     RAGAS_RETRY_COUNT: int = 2
     RAGAS_TIMEOUT: int = 180
 
     # ── Embeddings (Ollama) ───────────────────────────────────
-    EMBEDDING_MODEL: str = "nomic-embed-text"
-    EMBEDDING_API_BASE: str = "http://localhost:11434"
+    EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
+    # EMBEDDING_API_BASE: str = "http://localhost:11434"
     EMBEDDING_BATCH_SIZE: int = 64
 
     # ── Chunking ──────────────────────────────────────────────
@@ -62,7 +68,7 @@ class Settings(BaseSettings):
     # ── Retrieval ────────────────────────────────────────────
     TOP_K_DENSE: int = 20
     TOP_K_SPARSE: int = 20
-    TOP_K_RERANK: int = 5
+    TOP_K_RERANK: int = 10
     RETRIEVAL_SCORE_THRESHOLD: float = 0.45
     HYBRID_ALPHA: float = 0.7
 
@@ -89,10 +95,10 @@ class Settings(BaseSettings):
 
     # ── Query Rewriting (Phase 1 - Feature 1) ─────────────────
     ENABLE_QUERY_REWRITING: bool = True
-    QUERY_AMBIGUITY_THRESHOLD: float = 0.6
+    QUERY_AMBIGUITY_THRESHOLD: float = 0.4
     QUERY_MIN_LENGTH: int = 5
     QUERY_MAX_REWRITE_LENGTH: int = 150
-    QUERY_REWRITE_MODEL: str = "llama-3.3-70b-versatile"
+    QUERY_REWRITE_MODEL: str = "llama-3.1-8b-instant"
 
     # ── RAGAS Decision Layer (Phase 1 - Feature 2) ────────────
     RAGAS_FAITHFULNESS_THRESHOLD: float = 0.70
@@ -130,7 +136,7 @@ RAGAS_RETRY_COUNT = settings.RAGAS_RETRY_COUNT
 RAGAS_TIMEOUT = settings.RAGAS_TIMEOUT
 
 EMBEDDING_MODEL = settings.EMBEDDING_MODEL
-EMBEDDING_API_BASE = settings.EMBEDDING_API_BASE
+# EMBEDDING_API_BASE = settings.EMBEDDING_API_BASE
 EMBEDDING_BATCH_SIZE = settings.EMBEDDING_BATCH_SIZE
 
 CHUNK_SIZE = settings.CHUNK_SIZE

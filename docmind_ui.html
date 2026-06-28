@@ -87,6 +87,19 @@
   .score-low  { background:rgba(247,106,106,0.1); color:var(--danger);  border:1px solid rgba(247,106,106,0.2); }
   .sources-toggle { background:none; border:1px solid var(--border); color:var(--muted); border-radius:6px; padding:2px 8px; font-size:10px; font-family:'DM Mono',monospace; cursor:pointer; transition:all 0.2s; }
   .sources-toggle:hover { border-color:var(--accent); color:var(--accent); }
+  .eval-btn { background:none; border:1px solid var(--border); color:var(--muted); border-radius:6px; padding:2px 8px; font-size:10px; font-family:'DM Mono',monospace; cursor:pointer; transition:all 0.2s; display:inline-flex; align-items:center; gap:6px; }
+  .eval-btn:hover:not(:disabled) { border-color:var(--accent2); color:var(--accent2); }
+  .eval-btn:disabled { cursor:not-allowed; opacity:0.7; }
+  .eval-spinner { width:9px; height:9px; border-radius:50%; border:1.5px solid var(--muted); border-top-color:var(--accent2); animation:spin 0.7s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .eval-card { background:var(--surface); border:1px solid rgba(247,194,106,0.25); border-radius:10px; padding:14px 16px; max-width:72%; margin-left:4px; margin-top:-8px; animation:fadeUp 0.25s ease; }
+  .eval-card-title { font-family:'DM Mono',monospace; font-size:10px; letter-spacing:1.5px; text-transform:uppercase; color:var(--accent2); margin-bottom:10px; }
+  .eval-row { display:flex; justify-content:space-between; font-family:'DM Mono',monospace; font-size:12px; padding:5px 0; border-bottom:1px solid var(--border); }
+  .eval-row:last-child { border-bottom:none; }
+  .eval-row .eval-label { color:var(--muted); }
+  .eval-row .eval-value { color:var(--text); font-weight:500; }
+  .eval-card.error { border-color:rgba(247,106,106,0.3); }
+  .eval-card.error .eval-card-title { color:var(--danger); }
   .sources-panel { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:12px 14px; max-width:72%; margin-left:4px; }
   .source-item { font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); padding:4px 0; border-bottom:1px solid var(--border); display:flex; gap:8px; }
   .source-item:last-child { border-bottom:none; }
@@ -238,7 +251,7 @@ async function selectSession(id) {
     const detail=await apiFetch(`/session/${id}`);
     (detail.messages||[]).forEach(m=>{
       appendMessage('user',m.question);
-      appendMessage('ai',m.answer,m.grounding_score??null,m.refused,[]);
+      appendMessage('ai',m.answer,m.grounding_score??null,m.refused,[],m.trace_id||null);
     });
   } catch(e){}
   scrollChat();
@@ -268,7 +281,7 @@ async function handleUpload(file) {
   let p=0; const ticker=setInterval(()=>{p=Math.min(p+Math.random()*15,85);fill.style.width=p+'%';pct.textContent=Math.round(p)+'%';},200);
   try {
     const fd=new FormData(); fd.append('file',file);
-    if(currentSessionId) fd.append('session_id',currentSessionId);
+    //if(currentSessionId) fd.append('session_id',currentSessionId); // it was storing every document in one session only
     const result=await apiFetch('/upload',{method:'POST',body:fd});
     clearInterval(ticker); fill.style.width='100%'; pct.textContent='100%';
     setTimeout(()=>{progress.classList.remove('active');fill.style.width='0%';},800);
@@ -278,10 +291,11 @@ async function handleUpload(file) {
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
-function appendMessage(role,text,groundingScore=null,refused=false,sources=[]) {
+function appendMessage(role,text,groundingScore=null,refused=false,sources=[],traceId=null) {
   const area=document.getElementById('chatArea');
   const wrap=document.createElement('div');
   wrap.className=`msg msg-${role}${refused?' msg-refused':''}`;
+  if(traceId) wrap.id=`msg-${traceId}`;
   if(role==='user'){
     wrap.innerHTML=`<div class="msg-bubble">${escHtml(text)}</div>`;
   } else {
@@ -290,12 +304,64 @@ function appendMessage(role,text,groundingScore=null,refused=false,sources=[]) {
     if(groundingScore!==null){const cls=groundingScore>=0.8?'score-high':groundingScore>=0.5?'score-mid':'score-low';scorePill=`<span class="score-pill ${cls}">ground ${Math.round(groundingScore*100)}%</span>`;}
     const srcBtn=sources.length?`<button class="sources-toggle" onclick="toggleSources(this)">sources (${sources.length})</button>`:'';
     const srcPanel=sources.length?`<div class="sources-panel hidden">${sources.map(s=>`<div class="source-item"><span class="source-chunk">${s.chunk_id||'—'}</span><span>${s.source||''}</span><span>p.${s.page??'?'}</span></div>`).join('')}</div>`:'';
-    wrap.innerHTML=`<div class="msg-bubble">${formatted}</div><div class="msg-meta">${scorePill}${srcBtn}</div>${srcPanel}`;
+    // Evaluate button is only offered for traceable, non-refused answers — RAGAS needs the
+    // original question/answer/contexts, which we look up server-side by trace_id.
+    const evalBtn=(traceId && !refused)?`<button class="eval-btn" id="evalBtn-${traceId}" onclick="runEvaluation('${traceId}')">Evaluate</button>`:'';
+    wrap.innerHTML=`<div class="msg-bubble">${formatted}</div><div class="msg-meta">${scorePill}${srcBtn}${evalBtn}</div>${srcPanel}`;
   }
   area.appendChild(wrap); scrollChat();
 }
 
 function toggleSources(btn){const panel=btn.closest('.msg').querySelector('.sources-panel');if(panel)panel.classList.toggle('hidden');}
+
+// ── Evaluation (RAGAS) ────────────────────────────────────────────────────────
+async function runEvaluation(traceId) {
+  const btn = document.getElementById(`evalBtn-${traceId}`);
+  if (!btn || btn.disabled) return; // already running or already evaluated
+
+  // Do not rerun if a result card already exists for this answer
+  if (document.getElementById(`evalCard-${traceId}`)) return;
+
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.innerHTML = `<span class="eval-spinner"></span> Evaluating…`;
+
+  try {
+    const result = await apiFetch('/evaluate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: currentSessionId, trace_id: traceId })
+    });
+
+    const fmt = (v) => (v === null || v === undefined) ? 'N/A' : v.toFixed(2);
+    const cardHtml = `
+      <div class="eval-card" id="evalCard-${traceId}">
+        <div class="eval-card-title">Evaluation${result.cached ? ' · cached' : ''}</div>
+        <div class="eval-row"><span class="eval-label">Faithfulness</span><span class="eval-value">${fmt(result.faithfulness)}</span></div>
+        <div class="eval-row"><span class="eval-label">Answer Relevancy</span><span class="eval-value">${fmt(result.answer_relevancy)}</span></div>
+        <div class="eval-row"><span class="eval-label">Hallucination Rate</span><span class="eval-value">${fmt(result.hallucination_rate)}</span></div>
+      </div>`;
+
+    const msgEl = document.getElementById(`msg-${traceId}`);
+    if (msgEl) msgEl.insertAdjacentHTML('afterend', cardHtml);
+
+    btn.textContent = 'Evaluated ✓';
+    btn.disabled = true; // stays disabled — result is now shown as a card, no need to re-run
+    scrollChat();
+  } catch (err) {
+    const msgEl = document.getElementById(`msg-${traceId}`);
+    if (msgEl) {
+      msgEl.insertAdjacentHTML('afterend', `
+        <div class="eval-card error" id="evalCard-${traceId}-error">
+          <div class="eval-card-title">Evaluation failed</div>
+          <div class="eval-row"><span class="eval-label">${escHtml(err.message)}</span></div>
+        </div>`);
+    }
+    toast(`Evaluation failed: ${err.message}`, 'error');
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
+}
 function showThinking(){const area=document.getElementById('chatArea');const el=document.createElement('div');el.className='msg msg-ai';el.id='thinkingMsg';el.innerHTML=`<div class="thinking"><div class="thinking-dots"><div class="thinking-dot"></div><div class="thinking-dot"></div><div class="thinking-dot"></div></div><span class="thinking-label">Thinking…</span></div>`;area.appendChild(el);scrollChat();}
 function hideThinking(){document.getElementById('thinkingMsg')?.remove();}
 function scrollChat(){const area=document.getElementById('chatArea');area.scrollTop=area.scrollHeight;}
@@ -311,7 +377,7 @@ async function sendQuestion() {
   try {
     const result=await apiFetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:currentSessionId,question:q})});
     hideThinking();
-    appendMessage('ai',result.answer,result.grounding_score,result.refused,result.sources||[]);
+    appendMessage('ai',result.answer,result.grounding_score,result.refused,result.sources||[],result.trace_id||null);
     const score=result.grounding_score;
     const badge=document.getElementById('groundingBadge');
     badge.textContent=`Grounding: ${Math.round(score*100)}%`;

@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import List
 
-from langchain_ollama import OllamaEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 
 from configs import settings
 from observability.logger import get_logger
@@ -68,14 +68,13 @@ _cache = EmbeddingCache(settings.EMBEDDING_CACHE_DIR)
 
 # ── Embedding model ────────────────────────────────────────────────────────────
 
-def get_embedding_model() -> OllamaEmbeddings:
+def get_embedding_model() -> HuggingFaceEmbeddings:
     """
     Return a configured OllamaEmbeddings instance.
     Ollama must be running locally (it starts automatically after install).
     """
-    return OllamaEmbeddings(
-        model=settings.EMBEDDING_MODEL,   # nomic-embed-text
-        base_url=settings.EMBEDDING_API_BASE,  # http://localhost:11434
+    return HuggingFaceEmbeddings(
+        model_name=settings.EMBEDDING_MODEL,   
     )
 
 
@@ -108,7 +107,7 @@ def embed_texts_cached(texts: List[str]) -> List[List[float]]:
     return results
 
 
-def _embed_with_retry(embedder: OllamaEmbeddings, texts: List[str],
+def _embed_with_retry(embedder: HuggingFaceEmbeddings, texts: List[str],
                       retries: int = 3, delay: float = 2.0) -> List[List[float]]:
     for attempt in range(1, retries + 1):
         try:

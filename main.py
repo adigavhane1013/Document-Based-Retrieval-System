@@ -29,6 +29,7 @@ from vectorstore.vectordb import (
 )
 from retrieval.retriever import HybridRetriever
 from rag.pipeline import RAGSession, RAGResponse, run_pipeline
+from evaluation.ragas_eval import run_ragas_evaluation
 from observability.logger import get_logger
 
 logger = get_logger("main")
@@ -218,6 +219,21 @@ class ChatResponse(BaseModel):
     timestamp:       str
 
 
+class EvaluateRequest(BaseModel):
+    """Request model for the optional RAGAS evaluation endpoint."""
+    session_id: str
+    trace_id:   str
+
+
+class EvaluateResponse(BaseModel):
+    """Response model for the optional RAGAS evaluation endpoint."""
+    trace_id:           str
+    faithfulness:       Optional[float] = None
+    answer_relevancy:   Optional[float] = None
+    hallucination_rate: Optional[float] = None
+    cached:             bool
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -393,6 +409,96 @@ def ask_question(request: QuestionRequest) -> ChatResponse:
             raise HTTPException(504, "Request timeout")
         
         raise HTTPException(500, f"Error generating answer: {err}")
+
+
+@app.post("/evaluate", response_model=EvaluateResponse)
+def evaluate_answer(request: EvaluateRequest) -> EvaluateResponse:
+    """
+    Run an optional, on-demand RAGAS evaluation for a previously generated answer.
+
+    This is intentionally NOT called from /ask. It only runs when explicitly
+    triggered (e.g. by the user clicking "Evaluate" in the UI), since RAGAS
+    faithfulness/relevancy scoring makes its own LLM calls and is too slow/
+    costly to run automatically on every question.
+
+    Looks up the original question/answer/contexts from the session's stored
+    message history by trace_id (no need for the frontend to resend chunk text).
+    Results are cached in eval_history.json keyed by trace_id, so re-clicking
+    Evaluate on an already-evaluated answer returns the cached result instead
+    of re-running RAGAS.
+
+    Args:
+        request: EvaluateRequest with session_id and trace_id
+
+    Returns:
+        EvaluateResponse with faithfulness, answer_relevancy, hallucination_rate
+    """
+    if request.session_id not in chat_sessions:
+        raise HTTPException(404, "Session not found")
+
+    # ── Check cache first — never re-run for an already-evaluated trace ────────
+    eval_history = _load_eval_history()
+    cached = next((e for e in eval_history if e.get("trace_id") == request.trace_id), None)
+    if cached:
+        return EvaluateResponse(
+            trace_id=request.trace_id,
+            faithfulness=cached["faithfulness"],
+            answer_relevancy=cached["answer_relevancy"],
+            hallucination_rate=cached["hallucination_rate"],
+            cached=True,
+        )
+
+    # ── Locate the original message by trace_id ─────────────────────────────────
+    messages = chat_sessions[request.session_id].get("messages", [])
+    message = next((m for m in messages if m.get("trace_id") == request.trace_id), None)
+    if message is None:
+        raise HTTPException(404, "No stored answer found for this trace_id")
+
+    if message.get("refused"):
+        raise HTTPException(400, "Cannot evaluate a refused/ungrounded answer — no answer was generated")
+
+    contexts = message.get("contexts") or []
+    if not contexts:
+        raise HTTPException(400, "No retrieved context available to evaluate against")
+
+    # ── Run RAGAS (reuses existing implementation, single test case) ────────────
+    test_case = {
+        "question": message["question"],
+        "answer":   message["answer"],
+        "contexts": contexts,
+    }
+
+    try:
+        result = run_ragas_evaluation([test_case])
+    except Exception as e:
+        logger.error(f"RAGAS evaluation failed for trace {request.trace_id}: {e}")
+        raise HTTPException(500, f"Evaluation failed: {e}")
+
+    if result.get("error") or result.get("evaluated_cases", 0) == 0:
+        raise HTTPException(500, f"Evaluation failed: {result.get('error', 'no valid cases evaluated')}")
+
+    result = _sanitize_floats(result)
+
+    response = EvaluateResponse(
+        trace_id=request.trace_id,
+        faithfulness=result["faithfulness"],
+        answer_relevancy=result["answer_relevancy"],
+        hallucination_rate=result["hallucination_rate"],
+        cached=False,
+    )
+
+    # ── Persist to eval history so future clicks hit the cache ──────────────────
+    eval_history.append({
+        "trace_id":           request.trace_id,
+        "session_id":         request.session_id,
+        "faithfulness":       response.faithfulness,
+        "answer_relevancy":   response.answer_relevancy,
+        "hallucination_rate": response.hallucination_rate,
+        "evaluated_at":       datetime.now().isoformat(),
+    })
+    _save_eval_history(eval_history)
+
+    return response
 
 
 @app.get("/sessions")

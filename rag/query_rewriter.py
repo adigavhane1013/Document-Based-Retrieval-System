@@ -74,7 +74,10 @@ def detect_ambiguity(query: str) -> float:
         "something", "anything", "things", "stuff", "what",
         "about", "like", "tell me", "give me", "show me",
         "how", "why", "so", "etc", "other",
-        "generally", "usually", "sometimes", "anyway"
+        "generally", "usually", "sometimes", "anyway",
+        
+        "it","its",
+        "this","that","they","them","these","those","their"
     ]
     vague_count = sum(1 for word in vague_words if f" {word} " in f" {query_lower} ")
     if vague_count > 0:
@@ -277,6 +280,11 @@ def rewrite_with_logging(query: str) -> Tuple[str, Dict[str, Any]]:
     else:
         rewritten_query = query
         was_rewritten = False
+
+    print("\n" + "=" * 80)
+    print(f"ORIGINAL QUERY : {query}")
+    print(f"REWRITTEN QUERY: {rewritten_query}")
+    print("=" * 80 + "\n")
     
     # Step 3: Calculate metrics
     elapsed_ms = (time.time() - start_time) * 1000

@@ -68,9 +68,16 @@ class RAGResponse:
 def run_pipeline(session: RAGSession, question: str) -> RAGResponse:
     trace = RAGTrace(session_id=session.session_id, question=question)
 
+    rewritten_query, rewrite_metadata = rewrite_with_logging(question)
+
+    print("\n" + "=" * 80)
+    print(f"ORIGINAL QUERY : {question}")
+    print(f"REWRITTEN QUERY: {rewritten_query}")
+    print("=" * 80 + "\n")
+
     try:
         # ── Step 1: Retrieve ──────────────────────────────────────────────────
-        docs, scores = session.retriever.retrieve(question)
+        docs, scores = session.retriever.retrieve(rewritten_query)
 
         if not docs:
             logger.warning(f"[{session.session_id}] No docs retrieved for: {question[:80]}")
@@ -119,6 +126,11 @@ def run_pipeline(session: RAGSession, question: str) -> RAGResponse:
 
         response   = llm.invoke(messages, config={"callbacks": callbacks} if callbacks else {})
         raw_answer = response.content
+
+        print("\n" + "="*80)
+        print("RAW ANSWER:")
+        print(raw_answer)
+        print("="*80 + "\n")
 
         # ── Step 5: Validate ──────────────────────────────────────────────────
         is_grounded, grounding_score, final_answer = check_response(raw_answer, reranked_docs)

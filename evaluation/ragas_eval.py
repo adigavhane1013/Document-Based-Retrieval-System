@@ -11,7 +11,7 @@ from configs import settings
 
 logger = get_logger("evaluation.ragas")
 
-from langchain_ollama import OllamaEmbeddings
+from embeddings.embedding_model import get_embedding_model
 
 
 # ─────────────────────────────────────────────────────────────
@@ -19,11 +19,7 @@ from langchain_ollama import OllamaEmbeddings
 # ─────────────────────────────────────────────────────────────
 
 def _get_embeddings():
-    return OllamaEmbeddings(
-        model=settings.EMBEDDING_MODEL,
-        base_url=settings.EMBEDDING_API_BASE,
-    )
-
+    return get_embedding_model()
 
 # ─────────────────────────────────────────────────────────────
 # Helpers
@@ -44,11 +40,25 @@ def _clean_answer(text: str) -> str:
 
 
 def _trim_contexts(contexts: List[str]) -> List[str]:
-    max_contexts = getattr(settings, "RAGAS_MAX_CONTEXTS", 3)
-    max_chars = getattr(settings, "RAGAS_CONTEXT_MAX_CHARS", 500)
+    max_contexts = getattr(settings, "RAGAS_MAX_CONTEXTS", 10)
+    max_chars = getattr(settings, "RAGAS_CONTEXT_MAX_CHARS", 4500)
 
     contexts = list(dict.fromkeys(contexts))
-    return [ctx[:max_chars] for ctx in contexts[:max_contexts]]
+    dropped_count = max(0, len(contexts) - max_contexts)
+    selected = contexts[:max_contexts]
+
+    truncated_count = sum(1 for ctx in selected if len(ctx) > max_chars)
+    if truncated_count or dropped_count:
+        logger.warning(
+            f"_trim_contexts: dropped {dropped_count} context(s) beyond "
+            f"RAGAS_MAX_CONTEXTS={max_contexts}, truncated {truncated_count} "
+            f"context(s) beyond RAGAS_CONTEXT_MAX_CHARS={max_chars}. "
+            f"RAGAS faithfulness will only see the retained portion — "
+            f"a citation pointing past the cutoff can score as unfaithful "
+            f"even though the full chunk supports it."
+        )
+
+    return [ctx[:max_chars] for ctx in selected]
 
 
 def _is_rate_limit_error(error: Exception) -> bool:
@@ -117,6 +127,13 @@ def _get_llm():
         model=settings.LLM_MODEL,
         temperature=settings.LLM_TEMPERATURE,
         max_tokens=settings.LLM_MAX_TOKENS,
+        # RAGAS's internal prompts (claim decomposition, NLI verification) require
+        # strict JSON-only output. Llama-via-Groq tends to add reasoning text before
+        # the JSON block, which breaks LangChain's JSON output parser
+        # (OUTPUT_PARSING_FAILURE). Forcing JSON mode here is safe — this LLM
+        # instance is only ever used internally by RAGAS, never to generate
+        # user-facing answers.
+        model_kwargs={"response_format": {"type": "json_object"}},
     )
 
 
@@ -235,58 +252,70 @@ def run_ragas_evaluation(test_cases: List[Dict[str, Any]]) -> Dict[str, Any]:
         }
 
     # ── Process results ───────────────────────────────────────
-    valid_rows = []
-    failed_count = 0
+    # IMPORTANT: faithfulness and answer_relevancy can fail independently
+    # (e.g. Faithfulness hits a JSON parse error while Answer Relevancy
+    # succeeds for the same row). Score each metric on its own valid values
+    # rather than discarding a row entirely because one metric is NaN —
+    # otherwise a single bad parse on one metric silently throws away a
+    # perfectly good score from the other.
+    faith_vals: List[float] = []
+    relev_vals: List[float] = []
+    fully_failed_count = 0  # rows where BOTH metrics failed
 
     for i in range(len(df)):
         f_val = df.iloc[i].get("faithfulness")
         r_val = df.iloc[i].get("answer_relevancy")
 
-        if f_val is None or r_val is None or math.isnan(f_val) or math.isnan(r_val):
-            failed_count += 1
-            continue
+        f_ok = f_val is not None and not math.isnan(f_val)
+        r_ok = r_val is not None and not math.isnan(r_val)
 
-        valid_rows.append((f_val, r_val))
+        if f_ok:
+            faith_vals.append(f_val)
+        if r_ok:
+            relev_vals.append(r_val)
+        if not f_ok and not r_ok:
+            fully_failed_count += 1
+        if not f_ok:
+            logger.warning(f"Faithfulness failed for case {i} (likely judge-LLM parse error) — excluded from average")
+        if not r_ok:
+            logger.warning(f"Answer relevancy failed for case {i} — excluded from average")
 
-    if not valid_rows:
+    if not faith_vals and not relev_vals:
         return {
-            "error": "All evaluations failed",
+            "error": "All evaluations failed for every metric",
             "evaluated_cases": 0,
-            "failed_cases": failed_count,
+            "failed_cases": fully_failed_count,
         }
 
-    faith_avg = sum(f for f, _ in valid_rows) / len(valid_rows)
-    relev_avg = sum(r for _, r in valid_rows) / len(valid_rows)
+    faith_avg = (sum(faith_vals) / len(faith_vals)) if faith_vals else None
+    relev_avg = (sum(relev_vals) / len(relev_vals)) if relev_vals else None
 
     # ── Per question breakdown ────────────────────────────────
     per_question = []
-    idx = 0
 
     for i in range(len(df)):
-        if idx >= len(valid_rows):
-            break
-
         f_val = df.iloc[i].get("faithfulness")
         r_val = df.iloc[i].get("answer_relevancy")
 
-        if f_val is None or r_val is None or math.isnan(f_val) or math.isnan(r_val):
-            continue
+        f_ok = f_val is not None and not math.isnan(f_val)
+        r_ok = r_val is not None and not math.isnan(r_val)
+
+        if not f_ok and not r_ok:
+            continue  # nothing usable for this case at all
 
         per_question.append({
             "question": cleaned_cases[i]["question"],
-            "faithfulness": round(_safe(f_val), 3),
-            "answer_relevancy": round(_safe(r_val), 3),
+            "faithfulness": round(_safe(f_val), 3) if f_ok else None,
+            "answer_relevancy": round(_safe(r_val), 3) if r_ok else None,
         })
-
-        idx += 1
 
     # ── Final output ──────────────────────────────────────────
     return {
-        "evaluated_cases": len(valid_rows),
-        "failed_cases": failed_count,
+        "evaluated_cases": len(per_question),
+        "failed_cases": fully_failed_count,
         "total_cases": len(test_cases),
-        "faithfulness": round(faith_avg, 3),
-        "answer_relevancy": round(relev_avg, 3),
-        "hallucination_rate": round(1.0 - faith_avg, 3),
+        "faithfulness": round(faith_avg, 3) if faith_avg is not None else None,
+        "answer_relevancy": round(relev_avg, 3) if relev_avg is not None else None,
+        "hallucination_rate": round(1.0 - faith_avg, 3) if faith_avg is not None else None,
         "per_question": per_question,
     }
