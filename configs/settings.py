@@ -32,6 +32,13 @@ class Settings(BaseSettings):
 
     # ── LLM (Groq) ────────────────────────────────────────────
     LLM_API_KEY: Optional[str] = Field(default=None, validation_alias="GROQ_API_KEY")
+
+    # ── Vector Store (Qdrant Cloud) ───────────────────────────
+    QDRANT_URL: Optional[str] = Field(default=None, validation_alias="QDRANT_URL")
+    QDRANT_API_KEY: Optional[str] = Field(default=None, validation_alias="QDRANT_API_KEY")
+
+    # ── Auth ──────────────────────────────────────────────────
+    JWT_SECRET_KEY: str = Field(default="change-me-in-production", validation_alias="JWT_SECRET_KEY")
     LLM_API_BASE: str = "https://api.groq.com/openai/v1"
     LLM_MODEL: str = "llama-3.3-70b-versatile"
     LLM_TEMPERATURE: float = 0.0
@@ -98,7 +105,11 @@ class Settings(BaseSettings):
     QUERY_AMBIGUITY_THRESHOLD: float = 0.4
     QUERY_MIN_LENGTH: int = 5
     QUERY_MAX_REWRITE_LENGTH: int = 150
-    QUERY_REWRITE_MODEL: str = "llama-3.1-8b-instant"
+    # FIXED: Changed from "llama-3.1-8b-instant" (NOT available on Groq)
+    # to "llama-3.3-70b-versatile" (actual available model on Groq API)
+    # Issue: API calls to 3.1-8b-instant were failing silently
+    # Result: Query rewriting now actually works instead of returning original query
+    QUERY_REWRITE_MODEL: str = "llama-3.3-70b-versatile"
 
     # ── RAGAS Decision Layer (Phase 1 - Feature 2) ────────────
     RAGAS_FAITHFULNESS_THRESHOLD: float = 0.70
@@ -122,6 +133,9 @@ VECTORSTORE_DIR = settings.VECTORSTORE_DIR
 LOG_DIR = settings.LOG_DIR
 
 LLM_API_KEY = settings.LLM_API_KEY
+QDRANT_URL = settings.QDRANT_URL
+QDRANT_API_KEY = settings.QDRANT_API_KEY
+JWT_SECRET_KEY = settings.JWT_SECRET_KEY
 LLM_API_BASE = settings.LLM_API_BASE
 LLM_MODEL = settings.LLM_MODEL
 LLM_TEMPERATURE = settings.LLM_TEMPERATURE

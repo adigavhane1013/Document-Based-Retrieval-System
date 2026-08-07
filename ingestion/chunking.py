@@ -90,7 +90,7 @@ def chunk_documents(documents: List[Document]) -> List[Document]:
         for i, chunk in enumerate(valid_chunks):
             tokens = _token_len(chunk.page_content)
             
-            # Sanitize metadata to only str, int, float, bool (required by ChromaDB)
+            # Sanitize metadata to only str, int, float, bool (required by vector store payload)
             safe_metadata = {}
             for k, v in chunk.metadata.items():
                 if isinstance(v, (str, int, float, bool)):

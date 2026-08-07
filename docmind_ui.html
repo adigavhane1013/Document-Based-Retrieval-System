@@ -126,10 +126,54 @@
   .toast.success { border-color:rgba(106,247,168,0.4); color:var(--success); }
   @keyframes slideIn { from{transform:translateX(20px);opacity:0} to{transform:translateX(0);opacity:1} }
   .hidden { display:none !important; }
+
+  /* Login screen */
+  .login-screen { position:fixed; inset:0; z-index:100; background:var(--bg); display:flex; align-items:center; justify-content:center; }
+  .login-card { width:340px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:32px; }
+  .login-logo { font-family:'Fraunces',serif; font-size:24px; font-weight:300; margin-bottom:24px; text-align:center; }
+  .login-logo span { color:var(--accent); font-style:italic; }
+  .login-field { margin-bottom:14px; }
+  .login-field label { display:block; font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); margin-bottom:6px; text-transform:uppercase; letter-spacing:1px; }
+  .login-field input { width:100%; background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:10px 12px; color:var(--text); font-family:'Syne',sans-serif; font-size:13px; outline:none; }
+  .login-field input:focus { border-color:var(--accent); }
+  .login-btn { width:100%; padding:11px; border-radius:8px; border:none; background:linear-gradient(135deg,var(--accent),#9f7aea); color:white; font-family:'Syne',sans-serif; font-weight:600; font-size:13px; cursor:pointer; margin-top:6px; }
+  .login-btn:disabled { opacity:0.5; cursor:not-allowed; }
+  .login-switch { text-align:center; margin-top:16px; font-family:'DM Mono',monospace; font-size:11px; color:var(--muted); }
+  .login-switch a { color:var(--accent); cursor:pointer; text-decoration:none; }
+  .login-error { color:var(--danger); font-family:'DM Mono',monospace; font-size:11px; margin-top:10px; text-align:center; min-height:14px; line-height:1.5; }
+  .login-field-pw { position:relative; }
+  .login-field-pw input { padding-right:64px !important; }
+  .pw-toggle { position:absolute; right:10px; top:50%; transform:translateY(-50%); background:none; border:none; color:var(--muted); font-family:'DM Mono',monospace; font-size:10px; cursor:pointer; padding:4px 6px; letter-spacing:0.5px; text-transform:uppercase; }
+  .pw-toggle:hover { color:var(--accent); }
+  .user-bar { display:flex; align-items:center; justify-content:space-between; padding:10px 20px; border-top:1px solid var(--border); font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); }
+  .logout-btn { background:none; border:1px solid var(--border); color:var(--muted); border-radius:6px; padding:3px 8px; font-size:10px; cursor:pointer; font-family:'DM Mono',monospace; }
+  .logout-btn:hover { border-color:var(--danger); color:var(--danger); }
 </style>
 </head>
 <body>
-<div class="app">
+
+<!-- Login screen -->
+<div class="login-screen" id="loginScreen">
+  <div class="login-card">
+    <div class="login-logo">Doc<span>Mind</span></div>
+    <div class="login-field">
+      <label>Email</label>
+      <input type="email" id="authEmail" placeholder="you@example.com" autocomplete="email">
+    </div>
+    <div class="login-field login-field-pw">
+      <label>Password</label>
+      <input type="password" id="authPassword" placeholder="••••••••" autocomplete="current-password">
+      <button type="button" class="pw-toggle" id="pwToggleBtn" onclick="togglePasswordVisibility()">Show</button>
+    </div>
+    <button class="login-btn" id="authSubmitBtn" onclick="handleAuthSubmit()">Log In</button>
+    <div class="login-switch" id="authSwitchText">
+      No account? <a onclick="toggleAuthMode()">Sign up</a>
+    </div>
+    <div class="login-error" id="authError"></div>
+  </div>
+</div>
+
+<div class="app hidden" id="appRoot">
 
   <!-- Sidebar -->
   <aside class="sidebar">
@@ -154,6 +198,10 @@
     <div class="status-bar">
       <div class="status-dot"></div>
       <span id="statusText">API connected · localhost:8000</span>
+    </div>
+    <div class="user-bar" id="userBar">
+      <span class="user-email">—</span>
+      <button class="logout-btn" onclick="handleLogout()">Log out</button>
     </div>
   </aside>
 
@@ -193,6 +241,132 @@
   </main>
 </div>
 
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.17.1/firebase-app.js";
+import {
+  getAuth,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut
+} from "https://www.gstatic.com/firebasejs/12.17.1/firebase-auth.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDgEkwMzZcANv8bADbeV8irPW7SAlVvw68",
+  authDomain: "rag-project-46b0e.firebaseapp.com",
+  projectId: "rag-project-46b0e",
+  storageBucket: "rag-project-46b0e.firebasestorage.app",
+  messagingSenderId: "808730168129",
+  appId: "1:808730168129:web:e8c3f9c04dcd594a58efc0",
+};
+
+const firebaseApp = initializeApp(firebaseConfig);
+const fbAuth = getAuth(firebaseApp);
+
+let isSignupMode = false;
+let currentIdToken = null;
+window.currentIdToken = null;
+
+function toggleAuthMode() {
+  isSignupMode = !isSignupMode;
+  document.getElementById('authSubmitBtn').textContent = isSignupMode ? 'Sign Up' : 'Log In';
+  document.getElementById('authSwitchText').innerHTML = isSignupMode
+    ? 'Already have an account? <a onclick="toggleAuthMode()">Log in</a>'
+    : 'No account? <a onclick="toggleAuthMode()">Sign up</a>';
+  document.getElementById('authError').textContent = '';
+}
+window.toggleAuthMode = toggleAuthMode;
+
+function togglePasswordVisibility() {
+  const input = document.getElementById('authPassword');
+  const btn = document.getElementById('pwToggleBtn');
+  const isHidden = input.type === 'password';
+  input.type = isHidden ? 'text' : 'password';
+  btn.textContent = isHidden ? 'Hide' : 'Show';
+}
+window.togglePasswordVisibility = togglePasswordVisibility;
+
+// Maps Firebase Auth error codes to clear, user-facing messages.
+// Firebase's raw error.message is technical/inconsistent, so every code
+// we can reasonably expect from email/password sign-in and sign-up is
+// mapped explicitly here instead of trying to regex the raw string.
+function friendlyAuthError(err) {
+  const code = err.code || '';
+  const map = {
+    'auth/invalid-email':            'That email address looks invalid.',
+    'auth/user-disabled':            'This account has been disabled.',
+    'auth/user-not-found':           'No account found with that email.',
+    'auth/wrong-password':           'Incorrect password. Please try again.',
+    'auth/invalid-credential':       'Incorrect email or password.',
+    'auth/invalid-login-credentials':'Incorrect email or password.',
+    'auth/email-already-in-use':     'An account with that email already exists.',
+    'auth/weak-password':            'Password must be at least 6 characters.',
+    'auth/missing-password':         'Please enter a password.',
+    'auth/too-many-requests':        'Too many attempts. Please wait a moment and try again.',
+    'auth/network-request-failed':   'Network error — check your connection and try again.',
+  };
+  return map[code] || 'Something went wrong. Please try again.';
+}
+
+async function handleAuthSubmit() {
+  const email = document.getElementById('authEmail').value.trim();
+  const password = document.getElementById('authPassword').value;
+  const errEl = document.getElementById('authError');
+  const btn = document.getElementById('authSubmitBtn');
+  errEl.textContent = '';
+
+  if (!email || !password) { errEl.textContent = 'Enter email and password'; return; }
+
+  btn.disabled = true;
+  try {
+    if (isSignupMode) {
+      await createUserWithEmailAndPassword(fbAuth, email, password);
+    } else {
+      await signInWithEmailAndPassword(fbAuth, email, password);
+    }
+    // onAuthStateChanged below handles showing the app
+  } catch (err) {
+    errEl.textContent = friendlyAuthError(err);
+  }
+  btn.disabled = false;
+}
+window.handleAuthSubmit = handleAuthSubmit;
+
+document.getElementById('authPassword').addEventListener('keydown', e => {
+  if (e.key === 'Enter') handleAuthSubmit();
+});
+
+async function handleLogout() {
+  await signOut(fbAuth);
+}
+window.handleLogout = handleLogout;
+
+onAuthStateChanged(fbAuth, async (user) => {
+  const loginScreen = document.getElementById('loginScreen');
+  const appRoot = document.getElementById('appRoot');
+
+  if (user) {
+    currentIdToken = await user.getIdToken();
+    window.currentIdToken = currentIdToken;
+    loginScreen.classList.add('hidden');
+    appRoot.classList.remove('hidden');
+    const userBar = document.getElementById('userBar');
+    if (userBar) userBar.querySelector('.user-email').textContent = user.email;
+    loadSessions();
+  } else {
+    currentIdToken = null;
+    window.currentIdToken = null;
+    loginScreen.classList.remove('hidden');
+    appRoot.classList.add('hidden');
+  }
+});
+
+// Refresh the ID token every 50 minutes (Firebase tokens expire after 1 hour)
+setInterval(async () => {
+  if (fbAuth.currentUser) { currentIdToken = await fbAuth.currentUser.getIdToken(true); window.currentIdToken = currentIdToken; }
+}, 50 * 60 * 1000);
+</script>
+
 <script>
 const API = 'http://localhost:8000';
 let currentSessionId = null;
@@ -200,6 +374,10 @@ let sessions = {};
 
 // ── API ───────────────────────────────────────────────────────────────────────
 async function apiFetch(path, opts={}) {
+  opts.headers = opts.headers || {};
+  if (window.currentIdToken || (typeof currentIdToken !== 'undefined' && currentIdToken)) {
+    opts.headers['Authorization'] = `Bearer ${currentIdToken}`;
+  }
   const r = await fetch(API+path, opts);
   if (!r.ok) { const e=await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail||r.statusText); }
   return r.json();
@@ -229,10 +407,10 @@ function renderSessions() {
   if (!ids.length) { list.innerHTML='<div class="empty-sessions">No documents yet.<br>Upload one to begin.</div>'; return; }
   list.innerHTML=ids.map(id=>{
     const s=sessions[id];
-    const name=(s.documents&&s.documents[0])||'Document';
+    const name=s.filename||'Untitled Document';
     return `<div class="session-card ${id===currentSessionId?'active':''}" onclick="selectSession('${id}')">
       <div class="session-name" title="${name}">${name}</div>
-      <div class="session-meta"><span>${s.chunks||0} chunks</span><span>${s.message_count||0} msgs</span></div>
+      <div class="session-meta"><span>${s.chunk_count||0} chunks</span><span>${s.message_count||0} msgs</span></div>
       <button class="session-delete" onclick="deleteSession(event,'${id}')">✕</button>
     </div>`;
   }).join('');
@@ -243,8 +421,8 @@ async function selectSession(id) {
   document.getElementById('emptyState').classList.add('hidden');
   const cv=document.getElementById('chatView'); cv.classList.remove('hidden'); cv.style.display='flex';
   const s=sessions[id];
-  document.getElementById('chatTitle').textContent=(s.documents&&s.documents[0])||'Document';
-  document.getElementById('chatMeta').textContent=`${s.chunks||0} chunks · ${s.message_count||0} messages`;
+  document.getElementById('chatTitle').textContent=s.filename||'Untitled Document';
+  document.getElementById('chatMeta').textContent=`${s.chunk_count||0} chunks · ${s.message_count||0} messages`;
   document.getElementById('chatArea').innerHTML='';
   document.getElementById('groundingBadge').textContent='Grounding: —';
   try {
@@ -395,8 +573,8 @@ document.getElementById('sendBtn').addEventListener('click',sendQuestion);
 document.getElementById('questionInput').addEventListener('input',function(){this.style.height='auto';this.style.height=Math.min(this.scrollHeight,120)+'px';});
 
 // ── Init ──────────────────────────────────────────────────────────────────────
-loadSessions();
-setInterval(loadSessions, 30000);
+// loadSessions() is now triggered by onAuthStateChanged once the user is signed in
+setInterval(() => { if (currentIdToken) loadSessions(); }, 30000);
 </script>
 </body>
 </html>

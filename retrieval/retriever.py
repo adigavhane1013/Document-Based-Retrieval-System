@@ -7,7 +7,7 @@ Hybrid dense + BM25 retrieval with RRF (Reciprocal Rank Fusion).
 from typing import List, Tuple
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
-from langchain_chroma import Chroma
+from langchain_qdrant import QdrantVectorStore
 from configs.settings import settings
 from observability.logger import get_logger
 
@@ -66,12 +66,12 @@ class HybridRetriever:
     This gives both semantic understanding and keyword coverage.
     """
     
-    def __init__(self, vectorstore: Chroma, all_chunks: List[Document]) -> None:
+    def __init__(self, vectorstore: QdrantVectorStore, all_chunks: List[Document]) -> None:
         """
         Initialize hybrid retriever.
         
         Args:
-            vectorstore: Chroma vector database for dense retrieval
+            vectorstore: Qdrant vector database for dense retrieval
             all_chunks: All documents for BM25 indexing
         """
         self._vectorstore = vectorstore

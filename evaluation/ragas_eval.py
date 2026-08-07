@@ -1,5 +1,6 @@
 # evaluation/ragas_eval.py
 
+import json
 import math
 import os
 import re
@@ -35,7 +36,7 @@ def _safe(val, default=0.0):
 def _clean_answer(text: str) -> str:
     if not text:
         return ""
-    text = re.sub(r"\[SOURCE:.*?\]", "", text)
+    text = re.sub(r"\[(?:SOURCE|src):.*?\]", "", text, flags=re.IGNORECASE)
     return text.strip()
 
 
@@ -67,16 +68,49 @@ def _is_rate_limit_error(error: Exception) -> bool:
     return "429" in error_str or "rate_limit" in error_str or "rate limit" in error_str
 
 
+def _is_json_parse_error(error: Exception) -> bool:
+    """
+    Check if error is a JSON parsing/output format error.
+    
+    Common patterns:
+    - JSONDecodeError
+    - OUTPUT_PARSING_FAILURE
+    - "json" or "parse" in error message
+    - Llama reasoning before JSON in response
+    """
+    error_str = str(error).lower()
+    
+    # Direct error type checks
+    if "json" in error_str or "parse" in error_str or "parsing" in error_str:
+        return True
+    if "output_parsing" in error_str or "output parsing" in error_str:
+        return True
+    if "expected json" in error_str or "expected valid json" in error_str:
+        return True
+    
+    # Check error class name
+    error_type = type(error).__name__.lower()
+    if "json" in error_type or "parse" in error_type:
+        return True
+    
+    return False
+
+
 def _exponential_backoff_wait(attempt: int, base_wait: int = 5) -> int:
     """
     Calculate exponential backoff wait time.
     
     Args:
         attempt: Current attempt number (0-indexed)
-        base_wait: Base wait time in seconds
+        base_wait: Base wait time in seconds (default 5)
     
     Returns:
         Time to wait in seconds (base_wait * 2^attempt)
+        
+    Examples:
+        attempt=0: wait = 5 * 2^0 = 5 seconds
+        attempt=1: wait = 5 * 2^1 = 10 seconds
+        attempt=2: wait = 5 * 2^2 = 20 seconds
     """
     return base_wait * (2 ** attempt)
 
@@ -211,11 +245,13 @@ def run_ragas_evaluation(test_cases: List[Dict[str, Any]]) -> Dict[str, Any]:
     import nest_asyncio
     nest_asyncio.apply()
 
-    # ── UPDATED: Enhanced retry mechanism with rate limit handling ────────────
+    # ── ENHANCED: Retry with exponential backoff for ALL error types ───────────
     retry_count = getattr(settings, "RAGAS_RETRY_COUNT", 2)
-    max_rate_limit_retries = 3  # Allow extra retries for rate limit specifically
-    last_exception = None
+    max_rate_limit_retries = 3  # Extra retries for rate limits
     rate_limit_attempt = 0
+    json_parse_attempt = 0
+    last_exception = None
+    df = None
 
     for attempt in range(retry_count):
         try:
@@ -225,31 +261,67 @@ def run_ragas_evaluation(test_cases: List[Dict[str, Any]]) -> Dict[str, Any]:
                 run_config=RunConfig(max_workers=1, timeout=180),
             )
             df = result.to_pandas()
+            logger.info(f"RAGAS evaluation succeeded on attempt {attempt + 1}")
             break
             
         except Exception as e:
             is_rate_limit = _is_rate_limit_error(e)
+            is_json_error = _is_json_parse_error(e)
+            error_type = type(e).__name__
             
+            # ── Rate limit error: exponential backoff ──────────────────────────
             if is_rate_limit and rate_limit_attempt < max_rate_limit_retries:
-                # Special handling for rate limit errors
                 wait_time = _exponential_backoff_wait(rate_limit_attempt)
                 logger.warning(
-                    f"Rate limit hit (attempt {rate_limit_attempt + 1}). "
-                    f"Waiting {wait_time} seconds before retry..."
+                    f"Rate limit hit ({error_type}). "
+                    f"Backoff attempt {rate_limit_attempt + 1}/{max_rate_limit_retries}. "
+                    f"Waiting {wait_time}s before retry..."
                 )
                 rate_limit_attempt += 1
                 time.sleep(wait_time)
                 continue  # Retry without incrementing main attempt counter
             
-            # Regular error handling
-            logger.error(f"RAGAS attempt {attempt + 1} failed: {e}")
-            last_exception = e
-            time.sleep(2)
+            # ── JSON parse error: exponential backoff ──────────────────────────
+            # These are common with Llama reasoning before JSON. Backoff helps
+            # as Groq's server state may recover. After backoff fails, we still
+            # process partial results (per-metric fallback below).
+            elif is_json_error:
+                if json_parse_attempt < 2:  # Allow 2 backoff attempts for JSON errors
+                    wait_time = _exponential_backoff_wait(json_parse_attempt)
+                    logger.warning(
+                        f"JSON parse error ({error_type}). "
+                        f"This often happens when Llama adds reasoning before JSON. "
+                        f"Backoff attempt {json_parse_attempt + 1}/2. "
+                        f"Waiting {wait_time}s before retry..."
+                    )
+                    json_parse_attempt += 1
+                    time.sleep(wait_time)
+                    continue  # Retry without incrementing main attempt counter
+                else:
+                    # JSON backoff exhausted, log and fall through to fallback logic
+                    logger.error(
+                        f"JSON parse error ({error_type}) persists after backoff. "
+                        f"Will attempt per-metric partial evaluation if available."
+                    )
+                    last_exception = e
+                    break  # Exit loop to try partial results if they exist
+            
+            # ── Other errors: regular retry ────────────────────────────────────
+            else:
+                logger.warning(
+                    f"RAGAS attempt {attempt + 1}/{retry_count} failed ({error_type}): {e}"
+                )
+                last_exception = e
+                time.sleep(2)  # Brief pause before next attempt
     else:
-        return {
-            "error": f"Evaluation failed after {retry_count} attempts: {last_exception}",
-            "evaluated_cases": 0,
-        }
+        # Loop completed without success
+        if df is None:
+            return {
+                "error": f"Evaluation failed after {retry_count} attempts. "
+                         f"Last error ({type(last_exception).__name__ if last_exception else 'Unknown'}): "
+                         f"{last_exception}",
+                "evaluated_cases": 0,
+            }
 
     # ── Process results ───────────────────────────────────────
     # IMPORTANT: faithfulness and answer_relevancy can fail independently
@@ -258,6 +330,13 @@ def run_ragas_evaluation(test_cases: List[Dict[str, Any]]) -> Dict[str, Any]:
     # rather than discarding a row entirely because one metric is NaN —
     # otherwise a single bad parse on one metric silently throws away a
     # perfectly good score from the other.
+    
+    if df is None:
+        return {
+            "error": f"No evaluation results available. Last error: {last_exception}",
+            "evaluated_cases": 0,
+        }
+    
     faith_vals: List[float] = []
     relev_vals: List[float] = []
     fully_failed_count = 0  # rows where BOTH metrics failed
@@ -276,9 +355,15 @@ def run_ragas_evaluation(test_cases: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not f_ok and not r_ok:
             fully_failed_count += 1
         if not f_ok:
-            logger.warning(f"Faithfulness failed for case {i} (likely judge-LLM parse error) — excluded from average")
+            logger.warning(
+                f"Faithfulness failed for case {i} (likely judge-LLM parse error) "
+                f"— excluded from average"
+            )
         if not r_ok:
-            logger.warning(f"Answer relevancy failed for case {i} — excluded from average")
+            logger.warning(
+                f"Answer relevancy failed for case {i} "
+                f"— excluded from average"
+            )
 
     if not faith_vals and not relev_vals:
         return {
@@ -310,6 +395,12 @@ def run_ragas_evaluation(test_cases: List[Dict[str, Any]]) -> Dict[str, Any]:
         })
 
     # ── Final output ──────────────────────────────────────────
+    success_count = len(per_question)
+    logger.info(
+        f"RAGAS evaluation complete: {success_count} successful, "
+        f"{fully_failed_count} fully failed out of {len(cleaned_cases)} cases"
+    )
+    
     return {
         "evaluated_cases": len(per_question),
         "failed_cases": fully_failed_count,

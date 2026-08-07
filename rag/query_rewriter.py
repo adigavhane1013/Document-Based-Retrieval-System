@@ -119,7 +119,7 @@ def detect_ambiguity(query: str) -> float:
 def _get_rewrite_llm() -> ChatOpenAI:
     """
     Get LLM instance for query rewriting.
-    Uses faster, cheaper model for this task.
+    Uses same model as main pipeline (llama-3.3-70b-versatile on Groq).
     """
     return ChatOpenAI(
         model=settings.QUERY_REWRITE_MODEL,
@@ -130,7 +130,7 @@ def _get_rewrite_llm() -> ChatOpenAI:
     )
 
 
-def rewrite_query(query: str) -> str:
+def rewrite_query(query: str) -> Tuple[str, Optional[str]]:
     """
     Rewrite a vague query to be more specific and detailed.
     
@@ -140,14 +140,16 @@ def rewrite_query(query: str) -> str:
         query: Original vague query
     
     Returns:
-        Rewritten, more specific query
-    
-    Raises:
-        Exception: If LLM call fails
+        Tuple of (rewritten_query, error_message) where:
+        - rewritten_query: The rewritten query (or original if error)
+        - error_message: None if successful, error description if failed
     
     Example:
         Input: "What about symptoms?"
-        Output: "What are the symptoms of mild cognitive impairment in early stages?"
+        Output: ("What are the symptoms of mild cognitive impairment in early stages?", None)
+        
+        Input (with API error): "What about symptoms?"
+        Output: ("What about symptoms?", "APIError: Invalid model llama-3.1-8b-instant")
     """
     system_prompt = """You are a query optimization assistant. Your task is to rewrite vague or ambiguous user queries into specific, detailed queries that will improve document retrieval.
 
@@ -176,19 +178,22 @@ Rewritten query:"""
         
         # Validate the rewritten query
         if not rewritten or len(rewritten) < 3:
-            logger.warning(f"LLM returned invalid rewrite: '{rewritten}'. Using original.")
-            return query
+            error_msg = f"LLM returned invalid rewrite: '{rewritten}'"
+            logger.warning(f"Query rewrite failed: {error_msg}")
+            return query, error_msg
         
         # Ensure it's not too long
         if len(rewritten) > settings.QUERY_MAX_REWRITE_LENGTH:
             rewritten = rewritten[:settings.QUERY_MAX_REWRITE_LENGTH].rsplit(' ', 1)[0] + "?"
         
-        logger.debug(f"Rewrote: '{query}' → '{rewritten}'")
-        return rewritten
+        logger.debug(f"Successfully rewrote: '{query[:40]}...' → '{rewritten[:40]}...'")
+        return rewritten, None
         
     except Exception as e:
-        logger.error(f"Query rewriting failed: {e}. Using original query.")
-        return query
+        error_type = type(e).__name__
+        error_msg = f"{error_type}: {str(e)}"
+        logger.error(f"Query rewriting failed: {error_msg}")
+        return query, error_msg
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -239,12 +244,12 @@ def should_rewrite(query: str, threshold: float = settings.QUERY_AMBIGUITY_THRES
 
 def rewrite_with_logging(query: str) -> Tuple[str, Dict[str, Any]]:
     """
-    Rewrite query with comprehensive logging.
+    Rewrite query with comprehensive logging and error tracking.
     
     This is the main entry point. It:
       1. Detects if rewriting is needed
-      2. Rewrites if necessary
-      3. Logs all metadata
+      2. Rewrites if necessary (with error tracking)
+      3. Logs all metadata including any errors
       4. Returns both rewritten query and metadata
     
     Args:
@@ -258,13 +263,26 @@ def rewrite_with_logging(query: str) -> Tuple[str, Dict[str, Any]]:
           - was_rewritten: Boolean flag
           - ambiguity_score: Score before rewriting
           - timestamp: When rewriting occurred
+          - rewrite_error: Error message if rewriting failed (or None)
+          - rewrite_error_type: Exception type if error (or None)
     
-    Example:
+    Example (success):
         >>> rewritten, metadata = rewrite_with_logging("What about symptoms?")
         >>> print(rewritten)
         "What are the symptoms of mild cognitive impairment in early stages?"
         >>> print(metadata['was_rewritten'])
         True
+        >>> print(metadata['rewrite_error'])
+        None
+        
+    Example (ambiguity check pass, but LLM error):
+        >>> rewritten, metadata = rewrite_with_logging("What about symptoms?")
+        >>> print(rewritten)
+        "What about symptoms?"  # Original, because LLM failed
+        >>> print(metadata['was_rewritten'])
+        False
+        >>> print(metadata['rewrite_error'])
+        "APIError: Invalid model llama-3.1-8b-instant"
     """
     start_time = time.time()
     rewrite_id = str(uuid.uuid4())[:8]  # Short ID for logging
@@ -273,18 +291,20 @@ def rewrite_with_logging(query: str) -> Tuple[str, Dict[str, Any]]:
     ambiguity_score = detect_ambiguity(query)
     needs_rewrite = should_rewrite(query)
     
-    # Step 2: Rewrite if needed
+    # Step 2: Rewrite if needed (with error tracking)
+    rewrite_error = None
+    rewrite_error_type = None
+    
     if needs_rewrite:
-        rewritten_query = rewrite_query(query)
-        was_rewritten = rewritten_query != query
+        rewritten_query, rewrite_error = rewrite_query(query)
+        was_rewritten = (rewritten_query != query and rewrite_error is None)
+        
+        # Extract error type for metadata
+        if rewrite_error:
+            rewrite_error_type = rewrite_error.split(":")[0] if ":" in rewrite_error else "Unknown"
     else:
         rewritten_query = query
         was_rewritten = False
-
-    print("\n" + "=" * 80)
-    print(f"ORIGINAL QUERY : {query}")
-    print(f"REWRITTEN QUERY: {rewritten_query}")
-    print("=" * 80 + "\n")
     
     # Step 3: Calculate metrics
     elapsed_ms = (time.time() - start_time) * 1000
@@ -298,6 +318,8 @@ def rewrite_with_logging(query: str) -> Tuple[str, Dict[str, Any]]:
         "ambiguity_score": round(ambiguity_score, 3),
         "timestamp": datetime.now().isoformat(),
         "elapsed_ms": round(elapsed_ms, 2),
+        "rewrite_error": rewrite_error,
+        "rewrite_error_type": rewrite_error_type,
     }
     
     # Step 5: Log the operation
@@ -307,10 +329,16 @@ def rewrite_with_logging(query: str) -> Tuple[str, Dict[str, Any]]:
             f"'{query[:40]}...' → '{rewritten_query[:40]}...' "
             f"(ambiguity: {ambiguity_score:.2f})"
         )
+    elif rewrite_error:
+        logger.warning(
+            f"[{rewrite_id}] Query rewrite failed ({rewrite_error_type}): "
+            f"'{query[:40]}...' (ambiguity: {ambiguity_score:.2f}). "
+            f"Returning original query. Error: {rewrite_error}"
+        )
     else:
         logger.debug(
-            f"[{rewrite_id}] Query kept as-is: '{query[:40]}...' "
-            f"(ambiguity: {ambiguity_score:.2f})"
+            f"[{rewrite_id}] Query clear enough, no rewrite needed: "
+            f"'{query[:40]}...' (ambiguity: {ambiguity_score:.2f})"
         )
     
     return rewritten_query, metadata

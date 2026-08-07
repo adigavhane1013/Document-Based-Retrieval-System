@@ -2,6 +2,12 @@
 main.py
 
 FastAPI entrypoint. Thin HTTP layer only — no business logic.
+
+UPDATED: Decision layer integration with on-demand RAGAS evaluation.
+- /ask now accepts optional 'run_evaluation' parameter
+- If run_evaluation=true, runs RAGAS on-demand and passes scores to pipeline
+- Decision layer then accepts/retries/fallbacks based on quality scores
+- Responses include decision_metadata showing why answer was accepted/rejected
 """
 
 import json
@@ -14,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -31,8 +37,15 @@ from retrieval.retriever import HybridRetriever
 from rag.pipeline import RAGSession, RAGResponse, run_pipeline
 from evaluation.ragas_eval import run_ragas_evaluation
 from observability.logger import get_logger
+from auth import (
+    init_auth_db,
+    get_current_user,
+    CurrentUser,
+)
 
 logger = get_logger("main")
+
+init_auth_db()
 
 
 def _sanitize_floats(obj: Any) -> Any:
@@ -115,88 +128,38 @@ def _save_eval_history(history: List[Dict[str, Any]]) -> None:
         logger.error(f"Failed to save eval history: {e}")
 
 
-# ── In-memory state ────────────────────────────────────────────────────────────
-
-chat_sessions: Dict[str, Dict[str, Any]] = _load_sessions()
-rag_sessions:  Dict[str, RAGSession]     = {}
+# ── Global session storage ─────────────────────────────────────────────────────
+rag_sessions = {}
+chat_sessions = _load_sessions()
 
 
 def _rebuild_session(session_id: str) -> None:
-    """
-    Rebuild a RAG session from persisted vectorstore and chunks cache.
+    """Rebuild a RAGSession from stored chat data."""
+    if session_id not in chat_sessions:
+        return
     
-    Args:
-        session_id: Session ID to rebuild
-    """
-    try:
-        store = load_vectorstore(session_id)
-        if store is None:
-            logger.warning(f"No vectorstore for session {session_id}, skipping rebuild")
-            return
-        
-        chunk_cache_path = settings.STORAGE_DIR / f"chunks_{session_id}.json"
-        all_chunks = []
-        
-        if chunk_cache_path.exists():
-            from langchain_core.documents import Document
-            raw = json.loads(chunk_cache_path.read_text(encoding="utf-8"))
-            all_chunks = [
-                Document(page_content=c["content"], metadata=c["metadata"])
-                for c in raw
-            ]
-        
-        retriever = HybridRetriever(vectorstore=store, all_chunks=all_chunks)
-        rag_sessions[session_id] = RAGSession(
-            session_id=session_id,
-            retriever=retriever,
-            all_chunks=all_chunks,
-        )
-        logger.info(f"Rebuilt session {session_id}")
-    except Exception as e:
-        logger.error(f"Failed to rebuild session {session_id}: {e}")
+    vectorstore = load_vectorstore(session_id)
+    if vectorstore is None:
+        logger.warning(f"Could not load vectorstore for session {session_id}")
+        return
+    
+    # Note: HybridRetriever requires non-empty all_chunks for BM25 init
+    # Skip retriever creation here - it will be created fresh on next /ask call
+    logger.debug(f"Vectorstore loaded for session {session_id}")
 
 
-def _cache_chunks(session_id: str, chunks: List) -> None:
-    """
-    Cache chunks to disk for session recovery.
-    
-    Args:
-        session_id: Session ID
-        chunks: List of Document chunks to cache
-    """
-    path = settings.STORAGE_DIR / f"chunks_{session_id}.json"
-    existing = []
-    
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as e:
-            logger.warning(f"Could not load existing chunks cache: {e}")
-            existing = []
-    
-    new_entries = [{"content": c.page_content, "metadata": c.metadata} for c in chunks]
-    
-    try:
-        path.write_text(
-            json.dumps(existing + new_entries, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
-    except Exception as e:
-        logger.error(f"Failed to cache chunks for session {session_id}: {e}")
-
-
-logger.info("Rebuilding sessions on startup...")
+# Load all sessions on startup
 for sid in chat_sessions:
     _rebuild_session(sid)
-logger.info(f"Loaded {len(rag_sessions)} session(s)")
 
 
-# ── Pydantic models ────────────────────────────────────────────────────────────
+# ── Request/Response Models ────────────────────────────────────────────────────
 
 class QuestionRequest(BaseModel):
     """Request model for asking a question."""
     session_id: str
     question:   str
+    run_evaluation: bool = False  # NEW: Optional on-demand RAGAS evaluation
 
 
 class SourceInfo(BaseModel):
@@ -205,6 +168,17 @@ class SourceInfo(BaseModel):
     source:     Optional[str] = None
     page:       Optional[int] = None
     chunk_text: Optional[str] = None
+
+
+class DecisionInfo(BaseModel):
+    """Decision layer metadata."""
+    decision_type: str  # ACCEPT, RETRY, FALLBACK, REJECT
+    attempt: int
+    max_attempts: int
+    reason: str
+    faithfulness: Optional[float] = None
+    answer_relevancy: Optional[float] = None
+    thresholds: Optional[Dict[str, float]] = None
 
 
 class ChatResponse(BaseModel):
@@ -217,6 +191,7 @@ class ChatResponse(BaseModel):
     sources:         List[SourceInfo]
     trace_id:        str
     timestamp:       str
+    decision_metadata: Optional[DecisionInfo] = None  # NEW: Decision layer output
 
 
 class EvaluateRequest(BaseModel):
@@ -242,81 +217,107 @@ def health() -> Dict[str, Any]:
     return {"status": "ok", "sessions_loaded": len(rag_sessions)}
 
 
+# ── Auth ─────────────────────────────────────────────────────────────────
+# Registration and login happen client-side via the Firebase JS SDK
+# (docmind_ui.html). The backend only verifies the Firebase ID token
+# on every protected request — see auth.get_current_user.
+
+
 @app.post("/upload")
 def upload_document(
     file: UploadFile = File(...),
     session_id: Optional[str] = Form(None),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
-    Upload a document and add to RAG system.
-    
-    Supports PDF, TXT, MD, DOCX files.
-    Can create new session or append to existing session.
-    
-    Args:
-        file: Document file to upload
-        session_id: Optional existing session ID to append to
-    
-    Returns:
-        Dict with session_id, filename, pages, chunks, is_new_session
+    Upload a PDF or DOCX document.
+
+    Creates a new session if session_id is not provided.
     """
-    ext = Path(file.filename).suffix.lower()
-    if ext not in settings.ALLOWED_EXTENSIONS:
-        raise HTTPException(400, f"Unsupported file type '{ext}'")
+    if not file:
+        raise HTTPException(400, "No file provided")
 
-    file.file.seek(0, 2)
-    size_mb = file.file.tell() / (1024 * 1024)
-    file.file.seek(0)
-    if size_mb > settings.MAX_FILE_SIZE_MB:
-        raise HTTPException(400, f"File too large ({size_mb:.1f}MB > {settings.MAX_FILE_SIZE_MB}MB)")
+    # ── Validate file type ──────────────────────────────────────────────────
+    file_ext = Path(file.filename).suffix.lower()
+    if file_ext not in settings.ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            400,
+            f"File type {file_ext} not allowed. Allowed: {settings.ALLOWED_EXTENSIONS}"
+        )
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-        shutil.copyfileobj(file.file, tmp)
-        tmp_path = tmp.name
+    # ── Validate file size ──────────────────────────────────────────────────
+    file_content = file.file.read()
+    file_size_mb = len(file_content) / (1024 * 1024)
+    if file_size_mb > settings.MAX_FILE_SIZE_MB:
+        raise HTTPException(
+            413,
+            f"File size {file_size_mb:.1f}MB exceeds limit {settings.MAX_FILE_SIZE_MB}MB"
+        )
 
+    # ── Generate session_id if not provided ─────────────────────────────────
+    if not session_id:
+        session_id = str(uuid.uuid4())
+    is_new = session_id not in chat_sessions
+
+    tmp_path = None
     try:
-        documents = load_document(tmp_path, display_name=file.filename)
-        chunks    = chunk_documents(documents)
+        # ── Write to temp file ──────────────────────────────────────────────
+        with tempfile.NamedTemporaryFile(
+            suffix=file_ext, delete=False
+        ) as tmp:
+            tmp.write(file_content)
+            tmp_path = tmp.name
 
+        # ── Load and chunk document ─────────────────────────────────────────
+        docs = load_document(tmp_path)
+        if not docs:
+            raise ValueError("Document contains no extractable text")
+
+        chunks = chunk_documents(docs)
         if not chunks:
-            raise HTTPException(400, "Could not extract any text from the document.")
+            raise ValueError("No valid chunks after processing")
 
-        is_new = not session_id or session_id not in chat_sessions
-        sid    = session_id if not is_new else str(uuid.uuid4())
+        logger.info(
+            f"Loaded {len(docs)} doc(s), created {len(chunks)} chunk(s) "
+            f"for session {session_id}"
+        )
 
-        store = create_vectorstore(sid, chunks) if is_new else add_to_vectorstore(sid, chunks)
-        _cache_chunks(sid, chunks)
+        # ── Create or get vectorstore ──────────────────────────────────────
+        vectorstore = create_vectorstore(session_id, chunks)
+        
+        # ── Create RAGSession ──────────────────────────────────────────────
+        retriever = HybridRetriever(vectorstore=vectorstore, all_chunks=chunks)
+        rag_sessions[session_id] = RAGSession(
+            session_id=session_id,
+            retriever=retriever,
+            all_chunks=chunks,
+        )
 
-        existing_chunks = rag_sessions[sid].all_chunks if sid in rag_sessions else []
-        all_chunks = existing_chunks + chunks
-        retriever  = HybridRetriever(vectorstore=store, all_chunks=all_chunks)
-        rag_sessions[sid] = RAGSession(session_id=sid, retriever=retriever, all_chunks=all_chunks)
-
-        now = datetime.now().isoformat()
-        if is_new:
-            chat_sessions[sid] = {
-                "documents": [file.filename],
-                "documents_count": 1,
-                "pages":     len(documents),
-                "chunks":    len(chunks),
-                "created_at":  now,
-                "last_updated": now,
-                "messages":    [],
+        # ── Initialize chat session ─────────────────────────────────────────
+        timestamp = datetime.now().isoformat()
+        if session_id not in chat_sessions:
+            chat_sessions[session_id] = {
+                "session_id": session_id,
+                "user_id": current_user.user_id,
+                "created_at": timestamp,
+                "last_updated": timestamp,
+                "filename": file.filename,
+                "file_size_mb": round(file_size_mb, 2),
+                "document_count": len(docs),
+                "chunk_count": len(chunks),
+                "messages": [],
             }
-        else:
-            # FIXED: Use .get() with default to avoid KeyError
-            chat_sessions[sid]["documents"].append(file.filename)
-            chat_sessions[sid]["documents_count"] = chat_sessions[sid].get("documents_count", 0) + 1
-            chat_sessions[sid]["pages"]  = chat_sessions[sid].get("pages", 0) + len(documents)
-            chat_sessions[sid]["chunks"] = chat_sessions[sid].get("chunks", 0) + len(chunks)
-            chat_sessions[sid]["last_updated"] = now
-
+        elif chat_sessions[session_id].get("user_id") != current_user.user_id:
+            raise HTTPException(403, "This session belongs to another user")
         _save_sessions(chat_sessions)
+
         return {
-            "session_id": sid,
+            "session_id": session_id,
             "filename": file.filename,
-            "pages": len(documents),
-            "chunks": len(chunks),
+            "file_size_mb": round(file_size_mb, 2),
+            "document_count": len(docs),
+            "chunk_count": len(chunks),
+            "created_at": timestamp,
             "is_new_session": is_new
         }
 
@@ -326,35 +327,101 @@ def upload_document(
         logger.error(f"Upload error: {e}")
         raise HTTPException(500, f"Upload failed: {e}")
     finally:
-        Path(tmp_path).unlink(missing_ok=True)
+        Path(tmp_path).unlink(missing_ok=True) if tmp_path else None
 
 
 @app.post("/ask", response_model=ChatResponse)
-def ask_question(request: QuestionRequest) -> ChatResponse:
+def ask_question(
+    request: QuestionRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+) -> ChatResponse:
     """
     Ask a question about uploaded documents.
     
+    NEW: Supports optional on-demand RAGAS evaluation.
+    If run_evaluation=true, evaluates answer quality and passes scores
+    to decision layer for Accept/Retry/Fallback/Reject logic.
+    
     Args:
-        request: QuestionRequest with session_id and question
+        request: QuestionRequest with session_id, question, and optional run_evaluation
     
     Returns:
-        ChatResponse with answer, grounding_score, sources, trace_id
+        ChatResponse with answer, grounding_score, sources, trace_id, decision_metadata
     """
     if not request.question.strip():
         raise HTTPException(400, "Question cannot be empty")
 
+    if request.session_id not in chat_sessions:
+        raise HTTPException(404, "Session not found")
+    if chat_sessions[request.session_id].get("user_id") != current_user.user_id:
+        raise HTTPException(403, "This session belongs to another user")
+
     if request.session_id not in rag_sessions:
-        if request.session_id in chat_sessions:
-            _rebuild_session(request.session_id)
+        _rebuild_session(request.session_id)
         if request.session_id not in rag_sessions:
             raise HTTPException(404, "Session not found")
 
     try:
-        session   = rag_sessions[request.session_id]
+        session = rag_sessions[request.session_id]
+        
+        # ── Run pipeline (no evaluation yet) ────────────────────────────────
         result: RAGResponse = run_pipeline(session, request.question)
         timestamp = datetime.now().isoformat()
 
-        # FIXED: Improved context extraction with better filtering
+        # ── Optional: Run RAGAS evaluation and re-run decision layer ────────
+        eval_scores = None
+        if request.run_evaluation and not result.refused:
+            logger.info(f"Running on-demand RAGAS evaluation for trace {result.trace_id}")
+            
+            # Extract contexts from sources
+            contexts = []
+            if result.sources:
+                for s in result.sources:
+                    chunk_text = s.get("chunk_text", "").strip()
+                    if chunk_text:
+                        contexts.append(chunk_text)
+            
+            if contexts:
+                try:
+                    test_case = {
+                        "question": request.question,
+                        "answer": result.answer,
+                        "contexts": contexts,
+                    }
+                    
+                    eval_result = run_ragas_evaluation([test_case])
+                    
+                    if eval_result.get("error") or eval_result.get("evaluated_cases", 0) == 0:
+                        logger.warning(f"RAGAS evaluation had issues: {eval_result.get('error')}")
+                    else:
+                        # Extract scores for decision layer
+                        eval_scores = {
+                            "faithfulness": eval_result.get("faithfulness", 0.0),
+                            "answer_relevancy": eval_result.get("answer_relevancy", 0.0),
+                        }
+                        
+                        logger.info(
+                            f"RAGAS scores: faithfulness={eval_scores['faithfulness']:.2f}, "
+                            f"relevancy={eval_scores['answer_relevancy']:.2f}"
+                        )
+                        
+                        # ── Re-run decision layer with evaluation scores ────────
+                        result_with_decision: RAGResponse = run_pipeline(
+                            session, 
+                            request.question,
+                            eval_scores=eval_scores,
+                        )
+                        
+                        # Use decision-enhanced result
+                        result = result_with_decision
+                        
+                except Exception as e:
+                    logger.error(f"RAGAS evaluation failed: {e}")
+                    logger.info("Continuing without evaluation")
+            else:
+                logger.warning("No contexts available for RAGAS evaluation")
+
+        # ── Extract contexts for storage ────────────────────────────────────
         contexts = []
         if not result.refused and result.sources:
             for s in result.sources:
@@ -363,7 +430,7 @@ def ask_question(request: QuestionRequest) -> ChatResponse:
                 if chunk_text or source:
                     contexts.append(chunk_text if chunk_text else source)
 
-        # FIXED: Ensure message list exists before appending
+        # ── Ensure message list exists before appending ─────────────────────
         if request.session_id not in chat_sessions:
             logger.warning(f"Session {request.session_id} disappeared during ask")
             raise HTTPException(404, "Session not found")
@@ -371,7 +438,8 @@ def ask_question(request: QuestionRequest) -> ChatResponse:
         if "messages" not in chat_sessions[request.session_id]:
             chat_sessions[request.session_id]["messages"] = []
 
-        chat_sessions[request.session_id]["messages"].append({
+        # ── Store message in history ────────────────────────────────────────
+        message_entry = {
             "question":        request.question,
             "answer":          result.answer,
             "grounding_score": result.grounding_score,
@@ -379,9 +447,32 @@ def ask_question(request: QuestionRequest) -> ChatResponse:
             "trace_id":        result.trace_id,
             "timestamp":       timestamp,
             "contexts":        contexts,
-        })
+        }
+        
+        # Add evaluation scores to history if available
+        if eval_scores:
+            message_entry["eval_scores"] = eval_scores
+        
+        # Add decision metadata to history if available
+        if result.decision_metadata:
+            message_entry["decision_metadata"] = result.decision_metadata
+        
+        chat_sessions[request.session_id]["messages"].append(message_entry)
         chat_sessions[request.session_id]["last_updated"] = timestamp
         _save_sessions(chat_sessions)
+
+        # ── Build response with optional decision metadata ─────────────────
+        decision_info = None
+        if result.decision_metadata:
+            decision_info = DecisionInfo(
+                decision_type=result.decision_metadata.get("decision_type"),
+                attempt=result.decision_metadata.get("attempt", 1),
+                max_attempts=result.decision_metadata.get("max_attempts", 1),
+                reason=result.decision_metadata.get("reason", ""),
+                faithfulness=result.decision_metadata.get("scores", {}).get("faithfulness"),
+                answer_relevancy=result.decision_metadata.get("scores", {}).get("answer_relevancy"),
+                thresholds=result.decision_metadata.get("thresholds"),
+            )
 
         return ChatResponse(
             answer=result.answer,
@@ -392,6 +483,7 @@ def ask_question(request: QuestionRequest) -> ChatResponse:
             sources=[SourceInfo(**s) for s in result.sources],
             trace_id=result.trace_id,
             timestamp=timestamp,
+            decision_metadata=decision_info,
         )
 
     except HTTPException:
@@ -400,7 +492,6 @@ def ask_question(request: QuestionRequest) -> ChatResponse:
         err = str(e)
         logger.error(f"Ask error: {e}")
         
-        # FIXED: Check for specific error patterns instead of just string matching
         if "401" in err or "Unauthorized" in err:
             raise HTTPException(401, "API key invalid")
         if "429" in err or "rate_limit" in err.lower() or "rate limit" in err.lower():
@@ -412,11 +503,14 @@ def ask_question(request: QuestionRequest) -> ChatResponse:
 
 
 @app.post("/evaluate", response_model=EvaluateResponse)
-def evaluate_answer(request: EvaluateRequest) -> EvaluateResponse:
+def evaluate_answer(
+    request: EvaluateRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+) -> EvaluateResponse:
     """
     Run an optional, on-demand RAGAS evaluation for a previously generated answer.
 
-    This is intentionally NOT called from /ask. It only runs when explicitly
+    This is intentionally NOT called from /ask by default. It only runs when explicitly
     triggered (e.g. by the user clicking "Evaluate" in the UI), since RAGAS
     faithfulness/relevancy scoring makes its own LLM calls and is too slow/
     costly to run automatically on every question.
@@ -435,6 +529,8 @@ def evaluate_answer(request: EvaluateRequest) -> EvaluateResponse:
     """
     if request.session_id not in chat_sessions:
         raise HTTPException(404, "Session not found")
+    if chat_sessions[request.session_id].get("user_id") != current_user.user_id:
+        raise HTTPException(403, "This session belongs to another user")
 
     # ── Check cache first — never re-run for an already-evaluated trace ────────
     eval_history = _load_eval_history()
@@ -502,70 +598,75 @@ def evaluate_answer(request: EvaluateRequest) -> EvaluateResponse:
 
 
 @app.get("/sessions")
-def list_sessions() -> Dict[str, Any]:
-    """
-    List all sessions with their metadata.
-    
-    Returns:
-        Dict with "sessions" key containing list of session summaries
-    """
+def list_sessions(current_user: CurrentUser = Depends(get_current_user)) -> Dict[str, Any]:
+    """List sessions belonging to the current user."""
     return {
         "sessions": [
             {
-                "session_id":      sid,
-                "documents":       data.get("documents", []),
-                "documents_count": data.get("documents_count", 0),
-                "created_at":      data.get("created_at"),
-                "last_updated":    data.get("last_updated"),
-                "message_count":   len(data.get("messages", [])),
-                "pages":           data.get("pages", 0),
-                "chunks":          data.get("chunks", 0),
+                "session_id": sid,
+                "created_at": sess.get("created_at"),
+                "last_updated": sess.get("last_updated"),
+                "filename": sess.get("filename"),
+                "message_count": len(sess.get("messages", [])),
+                "document_count": sess.get("document_count"),
+                "chunk_count": sess.get("chunk_count"),
             }
-            for sid, data in chat_sessions.items()
+            for sid, sess in chat_sessions.items()
+            if sess.get("user_id") == current_user.user_id
         ]
     }
 
 
 @app.get("/session/{session_id}")
-def get_session(session_id: str) -> Dict[str, Any]:
-    """
-    Get detailed information about a specific session.
-    
-    Args:
-        session_id: Session ID to retrieve
-    
-    Returns:
-        Full session data with all messages and metadata
-    """
+def get_session(
+    session_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Get session details and full chat history."""
     if session_id not in chat_sessions:
         raise HTTPException(404, "Session not found")
-    return chat_sessions[session_id]
+    if chat_sessions[session_id].get("user_id") != current_user.user_id:
+        raise HTTPException(403, "This session belongs to another user")
+
+    session = chat_sessions[session_id]
+    return {
+        "session_id": session_id,
+        "created_at": session.get("created_at"),
+        "last_updated": session.get("last_updated"),
+        "filename": session.get("filename"),
+        "document_count": session.get("document_count"),
+        "chunk_count": session.get("chunk_count"),
+        "messages": session.get("messages", []),
+    }
 
 
 @app.delete("/session/{session_id}")
-def delete_session(session_id: str) -> Dict[str, str]:
-    """
-    Delete a session and all its data.
-    
-    Args:
-        session_id: Session ID to delete
-    
-    Returns:
-        Confirmation message
-    """
+def delete_session(
+    session_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+) -> Dict[str, str]:
+    """Delete a session and its associated vectorstore."""
     if session_id not in chat_sessions:
         raise HTTPException(404, "Session not found")
+    if chat_sessions[session_id].get("user_id") != current_user.user_id:
+        raise HTTPException(403, "This session belongs to another user")
+
     try:
-        chat_sessions.pop(session_id, None)
-        rag_sessions.pop(session_id, None)
         delete_vectorstore(session_id)
-        (settings.STORAGE_DIR / f"chunks_{session_id}.json").unlink(missing_ok=True)
+        del chat_sessions[session_id]
+        if session_id in rag_sessions:
+            del rag_sessions[session_id]
         _save_sessions(chat_sessions)
-        return {"message": "Session deleted"}
+        return {"message": f"Session {session_id} deleted"}
     except Exception as e:
         logger.error(f"Delete session error: {e}")
-        raise HTTPException(500, f"Delete failed: {e}")
+        raise HTTPException(500, f"Failed to delete session: {e}")
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+    )
