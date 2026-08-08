@@ -197,10 +197,13 @@ RETRY_LOWERED_THRESHOLD = settings.RETRY_LOWERED_THRESHOLD
 RETRY_CONTEXT_MAX_CHARS_INCREASE = settings.RETRY_CONTEXT_MAX_CHARS_INCREASE
 FALLBACK_LLM_MODEL = settings.FALLBACK_LLM_MODEL
 
-# Extra paths
-EMBEDDING_CACHE_DIR = settings.STORAGE_DIR / "embedding_cache"
-EMBEDDING_CACHE_DIR.mkdir(exist_ok=True)
-
-# Ensure required folders exist
+# Ensure required folders exist FIRST — order matters here.
+# On a fresh deploy (Railway/Render), none of these directories exist yet,
+# so EMBEDDING_CACHE_DIR (a subfolder of STORAGE_DIR) must not be created
+# before STORAGE_DIR itself exists.
 for d in [settings.STORAGE_DIR, settings.VECTORSTORE_DIR, settings.LOG_DIR]:
     d.mkdir(parents=True, exist_ok=True)
+
+# Extra paths
+EMBEDDING_CACHE_DIR = settings.STORAGE_DIR / "embedding_cache"
+EMBEDDING_CACHE_DIR.mkdir(parents=True, exist_ok=True)
