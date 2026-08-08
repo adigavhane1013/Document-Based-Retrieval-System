@@ -140,13 +140,12 @@
   .login-btn:disabled { opacity:0.5; cursor:not-allowed; }
   .login-switch { text-align:center; margin-top:16px; font-family:'DM Mono',monospace; font-size:11px; color:var(--muted); }
   .login-switch a { color:var(--accent); cursor:pointer; text-decoration:none; }
-  .login-error { color:var(--danger); font-family:'DM Mono',monospace; font-size:11px; margin-top:10px; text-align:center; min-height:14px; line-height:1.5; }
-  .login-field-pw { position:relative; }
-  .login-field-pw input { padding-right:64px !important; }
-  .pw-toggle { position:absolute; right:10px; top:50%; transform:translateY(-50%); background:none; border:none; color:var(--muted); font-family:'DM Mono',monospace; font-size:10px; cursor:pointer; padding:4px 6px; letter-spacing:0.5px; text-transform:uppercase; }
-  .pw-toggle:hover { color:var(--accent); }
+  .login-error { color:var(--danger); font-family:'DM Mono',monospace; font-size:11px; margin-top:10px; text-align:center; min-height:14px; }
   .user-bar { display:flex; align-items:center; justify-content:space-between; padding:10px 20px; border-top:1px solid var(--border); font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); }
   .logout-btn { background:none; border:1px solid var(--border); color:var(--muted); border-radius:6px; padding:3px 8px; font-size:10px; cursor:pointer; font-family:'DM Mono',monospace; }
+  .attach-btn { flex-shrink:0; width:32px; height:32px; border-radius:8px; border:1px solid var(--border); background:var(--surface2); color:var(--muted); font-size:18px; cursor:pointer; display:flex; align-items:center; justify-content:center; line-height:1; }
+  .attach-btn:hover { border-color:var(--accent); color:var(--accent); }
+  .attach-btn:disabled { opacity:0.4; cursor:not-allowed; }
   .logout-btn:hover { border-color:var(--danger); color:var(--danger); }
 </style>
 </head>
@@ -160,10 +159,9 @@
       <label>Email</label>
       <input type="email" id="authEmail" placeholder="you@example.com" autocomplete="email">
     </div>
-    <div class="login-field login-field-pw">
+    <div class="login-field">
       <label>Password</label>
       <input type="password" id="authPassword" placeholder="••••••••" autocomplete="current-password">
-      <button type="button" class="pw-toggle" id="pwToggleBtn" onclick="togglePasswordVisibility()">Show</button>
     </div>
     <button class="login-btn" id="authSubmitBtn" onclick="handleAuthSubmit()">Log In</button>
     <div class="login-switch" id="authSwitchText">
@@ -230,6 +228,8 @@
         <div class="chat-area" id="chatArea"></div>
         <div class="input-area">
           <div class="input-wrap">
+            <button class="attach-btn" id="attachBtn" title="Add file to this document set">+</button>
+            <input type="file" id="chatFileInput" accept=".pdf,.txt,.md,.docx" multiple class="hidden">
             <textarea id="questionInput" placeholder="Ask anything about your document..." rows="1"></textarea>
             <button class="send-btn" id="sendBtn">↑</button>
           </div>
@@ -277,37 +277,6 @@ function toggleAuthMode() {
 }
 window.toggleAuthMode = toggleAuthMode;
 
-function togglePasswordVisibility() {
-  const input = document.getElementById('authPassword');
-  const btn = document.getElementById('pwToggleBtn');
-  const isHidden = input.type === 'password';
-  input.type = isHidden ? 'text' : 'password';
-  btn.textContent = isHidden ? 'Hide' : 'Show';
-}
-window.togglePasswordVisibility = togglePasswordVisibility;
-
-// Maps Firebase Auth error codes to clear, user-facing messages.
-// Firebase's raw error.message is technical/inconsistent, so every code
-// we can reasonably expect from email/password sign-in and sign-up is
-// mapped explicitly here instead of trying to regex the raw string.
-function friendlyAuthError(err) {
-  const code = err.code || '';
-  const map = {
-    'auth/invalid-email':            'That email address looks invalid.',
-    'auth/user-disabled':            'This account has been disabled.',
-    'auth/user-not-found':           'No account found with that email.',
-    'auth/wrong-password':           'Incorrect password. Please try again.',
-    'auth/invalid-credential':       'Incorrect email or password.',
-    'auth/invalid-login-credentials':'Incorrect email or password.',
-    'auth/email-already-in-use':     'An account with that email already exists.',
-    'auth/weak-password':            'Password must be at least 6 characters.',
-    'auth/missing-password':         'Please enter a password.',
-    'auth/too-many-requests':        'Too many attempts. Please wait a moment and try again.',
-    'auth/network-request-failed':   'Network error — check your connection and try again.',
-  };
-  return map[code] || 'Something went wrong. Please try again.';
-}
-
 async function handleAuthSubmit() {
   const email = document.getElementById('authEmail').value.trim();
   const password = document.getElementById('authPassword').value;
@@ -326,7 +295,7 @@ async function handleAuthSubmit() {
     }
     // onAuthStateChanged below handles showing the app
   } catch (err) {
-    errEl.textContent = friendlyAuthError(err);
+    errEl.textContent = err.message.replace('Firebase: ', '').replace(/\(auth\/.*\)\.?/, '');
   }
   btn.disabled = false;
 }
@@ -453,17 +422,31 @@ uploadZone.addEventListener('dragleave',()=>uploadZone.classList.remove('drag-ov
 uploadZone.addEventListener('drop',e=>{e.preventDefault();uploadZone.classList.remove('drag-over');if(e.dataTransfer.files.length)handleUpload(e.dataTransfer.files[0]);});
 fileInput.addEventListener('change',()=>{if(fileInput.files.length)handleUpload(fileInput.files[0]);});
 
-async function handleUpload(file) {
+// Attach button in the chat composer — adds file(s) to the CURRENTLY OPEN session
+// instead of always starting a new one.
+const attachBtn=document.getElementById('attachBtn');
+const chatFileInput=document.getElementById('chatFileInput');
+attachBtn.addEventListener('click',()=>{
+  if(!currentSessionId){ toast('Open a document first','error'); return; }
+  chatFileInput.click();
+});
+chatFileInput.addEventListener('change',async ()=>{
+  const files=Array.from(chatFileInput.files);
+  chatFileInput.value='';
+  for(const f of files){ await handleUpload(f, currentSessionId); }
+});
+
+async function handleUpload(file, targetSessionId) {
   const progress=document.getElementById('uploadProgress'),fill=document.getElementById('progressFill'),label=document.getElementById('progressLabel'),pct=document.getElementById('progressPct');
   progress.classList.add('active'); label.textContent=file.name;
   let p=0; const ticker=setInterval(()=>{p=Math.min(p+Math.random()*15,85);fill.style.width=p+'%';pct.textContent=Math.round(p)+'%';},200);
   try {
     const fd=new FormData(); fd.append('file',file);
-    //if(currentSessionId) fd.append('session_id',currentSessionId); // it was storing every document in one session only
+    if(targetSessionId) fd.append('session_id',targetSessionId);
     const result=await apiFetch('/upload',{method:'POST',body:fd});
     clearInterval(ticker); fill.style.width='100%'; pct.textContent='100%';
     setTimeout(()=>{progress.classList.remove('active');fill.style.width='0%';},800);
-    toast(`✓ ${file.name} · ${result.chunks} chunks indexed`,'success');
+    toast(`✓ ${file.name} · ${result.chunk_count} chunks indexed`,'success');
     await loadSessions(); selectSession(result.session_id); fileInput.value='';
   } catch(err){clearInterval(ticker);progress.classList.remove('active');fill.style.width='0%';toast(err.message,'error');}
 }

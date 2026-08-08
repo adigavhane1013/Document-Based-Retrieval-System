@@ -282,8 +282,15 @@ def upload_document(
             f"for session {session_id}"
         )
 
-        # ── Create or get vectorstore ──────────────────────────────────────
-        vectorstore = create_vectorstore(session_id, chunks)
+        # ── Create or add to vectorstore ─────────────────────────────────────
+        # Use add_to_vectorstore for a session that already has documents,
+        # so new files extend the knowledge base instead of wiping it —
+        # create_vectorstore always recreates the collection from scratch.
+        is_existing_session = session_id in chat_sessions
+        if is_existing_session:
+            vectorstore = add_to_vectorstore(session_id, chunks)
+        else:
+            vectorstore = create_vectorstore(session_id, chunks)
         
         # ── Create RAGSession ──────────────────────────────────────────────
         retriever = HybridRetriever(vectorstore=vectorstore, all_chunks=chunks)
@@ -302,13 +309,22 @@ def upload_document(
                 "created_at": timestamp,
                 "last_updated": timestamp,
                 "filename": file.filename,
+                "filenames": [file.filename],
                 "file_size_mb": round(file_size_mb, 2),
                 "document_count": len(docs),
                 "chunk_count": len(chunks),
                 "messages": [],
             }
-        elif chat_sessions[session_id].get("user_id") != current_user.user_id:
-            raise HTTPException(403, "This session belongs to another user")
+        else:
+            if chat_sessions[session_id].get("user_id") != current_user.user_id:
+                raise HTTPException(403, "This session belongs to another user")
+            # Accumulate counts — this file's chunks were ADDED, not replacing prior ones
+            existing = chat_sessions[session_id]
+            existing["document_count"] = existing.get("document_count", 0) + len(docs)
+            existing["chunk_count"] = existing.get("chunk_count", 0) + len(chunks)
+            existing.setdefault("filenames", [existing.get("filename")] if existing.get("filename") else [])
+            existing["filenames"].append(file.filename)
+            existing["last_updated"] = timestamp
         _save_sessions(chat_sessions)
 
         return {
@@ -664,9 +680,11 @@ def delete_session(
 
 
 if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
-        reload=True,
+        port=port,
+        reload=False,
     )

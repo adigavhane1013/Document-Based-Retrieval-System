@@ -17,6 +17,8 @@ Design:
     (Firebase's uid).
 """
 
+import json
+import os
 from pathlib import Path
 
 import firebase_admin
@@ -41,22 +43,39 @@ def init_auth_db() -> None:
     Initialize the Firebase Admin SDK. Call once at startup.
     (Function name kept as init_auth_db for drop-in compatibility with
     the previous SQLite-based auth module.)
+
+    Credential source, checked in order:
+      1. FIREBASE_SERVICE_ACCOUNT_JSON env var — the full service account
+         JSON as a single-line string. Used in production (Railway/Render),
+         where committing the actual key file to git isn't safe.
+      2. firebase-service-account.json file in the project root — used for
+         local development only; this file must stay in .gitignore.
     """
     if firebase_admin._apps:
         logger.info("Firebase Admin SDK already initialized")
         return
 
-    if not _SERVICE_ACCOUNT_PATH.exists():
-        raise RuntimeError(
-            f"Firebase service account key not found at {_SERVICE_ACCOUNT_PATH}. "
-            "Download it from Firebase Console → Project Settings → Service Accounts "
-            "→ Generate new private key, and save it as 'firebase-service-account.json' "
-            "in the project root."
-        )
+    env_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+    if env_json:
+        try:
+            cred_dict = json.loads(env_json)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON: {e}")
+        cred = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred)
+        logger.info("Firebase Admin SDK initialized (from FIREBASE_SERVICE_ACCOUNT_JSON env var)")
+        return
 
-    cred = credentials.Certificate(str(_SERVICE_ACCOUNT_PATH))
-    firebase_admin.initialize_app(cred)
-    logger.info("Firebase Admin SDK initialized")
+    if _SERVICE_ACCOUNT_PATH.exists():
+        cred = credentials.Certificate(str(_SERVICE_ACCOUNT_PATH))
+        firebase_admin.initialize_app(cred)
+        logger.info(f"Firebase Admin SDK initialized (from {_SERVICE_ACCOUNT_PATH})")
+        return
+
+    raise RuntimeError(
+        "No Firebase credentials found. Set FIREBASE_SERVICE_ACCOUNT_JSON (production) "
+        "or place firebase-service-account.json in the project root (local dev)."
+    )
 
 
 # ── FastAPI dependency ───────────────────────────────────────────────────
