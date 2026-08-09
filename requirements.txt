@@ -21,6 +21,7 @@ qdrant-client>=1.9.0
 
 # Embeddings & reranking
 openai>=1.30.0
+langchain-huggingface>=0.0.3   # HuggingFaceEmbeddings wrapper
 sentence-transformers>=3.0.0   # cross-encoder reranker
 tiktoken>=0.7.0                # token counting for chunking
 
