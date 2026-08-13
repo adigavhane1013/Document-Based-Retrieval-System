@@ -4,17 +4,22 @@ Upload PDF, DOCX, TXT, or Markdown documents and ask grounded questions about th
 
 Built with **FastAPI**, **LangChain**, **Qdrant Cloud**, **HuggingFace Embeddings (BAAI/bge-small-en-v1.5)**, **Groq (llama-3.3-70b-versatile)**, and **Firebase Authentication**.
 
+**Live:**
+- Frontend: https://document-based-retrieval-system.vercel.app/
+- Backend API: https://document-based-retrieval-system-production.up.railway.app
+
 ---
 
 ## Features
 
 - **Authentication** — email/password sign-up and login via Firebase; every session, upload, and answer is scoped to the logged-in user (403 if you try to access another user's session)
 - **Multi-format upload** — PDF, TXT, MD, DOCX
+- **Multi-document sessions** — add additional files to an already-open session via the attach (`+`) button in the chat composer; they extend the same knowledge base instead of replacing it
 - **Column-aware PDF extraction** — detects multi-column layouts (e.g. resumes/CVs) and reads each column top-to-bottom instead of merging unrelated text across columns
 - **Context-aware Q&A** — answers grounded strictly in retrieved chunks
 - **Hybrid retrieval** — dense (Qdrant) + sparse (BM25), merged and cross-encoder reranked
 - **Query rewriting** — detects ambiguous queries and rewrites them via LLM before retrieval
-- **Session isolation** — each uploaded document gets its own vector collection, scoped to its owner
+- **Session isolation** — each uploaded document set gets its own vector collection, scoped to its owner
 - **Source citations** — every answer cites the chunk IDs it used
 - **Grounding score** — every answer includes a grounding score from the hallucination filter
 - **On-demand RAGAS evaluation** — Faithfulness, Answer Relevancy, and Hallucination Rate, triggered manually per answer (not run automatically on every query)
@@ -24,7 +29,7 @@ Built with **FastAPI**, **LangChain**, **Qdrant Cloud**, **HuggingFace Embedding
   - RETRY and FALLBACK are currently logged but not yet acted on (no automatic re-retrieval or model-switching loop implemented yet)
   - Decision-layer errors are caught — a failure here never crashes the pipeline; the answer is still returned
 - **Structured logging** — JSON logs written to `logs/rag.log`
-- **Web UI** — browser-based interface via `docmind_ui.html`, including login/signup, show/hide password, and clear error messages for invalid credentials
+- **Web UI** — browser-based interface (`index.html`), including login/signup, show/hide password, and clear error messages for invalid credentials
 
 ---
 
@@ -79,9 +84,9 @@ Answer + sources + grounding score (+ evaluation, if requested) returned
 
 | Layer | Technology |
 |---|---|
-| UI | HTML/CSS/JS (`docmind_ui.html`) |
+| UI | HTML/CSS/JS (`index.html`) — deployed on Vercel |
+| Backend | FastAPI, Uvicorn — deployed on Railway |
 | Auth | Firebase Authentication (email/password) |
-| Backend | FastAPI, Uvicorn |
 | LLM | Groq — `llama-3.3-70b-versatile` |
 | Embeddings | HuggingFace — `BAAI/bge-small-en-v1.5` |
 | Orchestration | LangChain |
@@ -99,7 +104,7 @@ Answer + sources + grounding score (+ evaluation, if requested) returned
 rag_production/
 │
 ├── configs/
-│   └── settings.py                 # Central settings (thresholds, models, paths, Qdrant/Groq/Firebase config)
+│   └── settings.py                 # Central settings (thresholds, models, paths, Qdrant/Groq config)
 │
 ├── embeddings/
 │   └── embedding_model.py          # HuggingFace BAAI/bge-small-en-v1.5 wrapper
@@ -130,7 +135,7 @@ rag_production/
 │   ├── reranker.py                 # Cross-encoder reranking
 │   └── retriever.py                # Hybrid dense (Qdrant) + BM25 retrieval
 │
-├── storage/                        # Session metadata, eval history
+├── storage/                        # Session metadata, eval history (created at runtime)
 │
 ├── tests/
 │   ├── test_decision_layer.py
@@ -142,16 +147,17 @@ rag_production/
 │   └── vectordb.py                 # Qdrant Cloud init + wrapper
 │
 ├── auth.py                         # Firebase ID token verification (FastAPI dependency)
-├── firebase-service-account.json   # Firebase Admin SDK credentials (not committed)
-├── .env
-├── docmind_ui.html
+├── .env                             # local secrets (not committed)
+├── index.html                      # Web UI — entry point
 ├── main.py                         # FastAPI app + REST endpoints
 └── requirements.txt
 ```
 
+`firebase-service-account.json` is required locally (project root) but never committed — see Deployment below for how it's supplied in production.
+
 ---
 
-## Installation
+## Local Setup
 
 ### Prerequisites
 
@@ -160,7 +166,7 @@ rag_production/
 - A [Qdrant Cloud](https://cloud.qdrant.io) cluster (free tier works)
 - A [Firebase](https://console.firebase.google.com) project with Email/Password sign-in enabled
 
-### Setup
+### Install
 
 ```bash
 git clone https://github.com/adigavhane1013/Document-Based-Retrieval-System.git
@@ -178,12 +184,10 @@ HuggingFace embeddings (`BAAI/bge-small-en-v1.5`) download automatically on firs
 ### Firebase setup
 
 1. Firebase Console → Authentication → enable **Email/Password** sign-in
-2. Project Settings → General → Add app → Web (`</>`) → copy the `firebaseConfig` into the `<script type="module">` block in `docmind_ui.html`
-3. Project Settings → Service Accounts → Generate new private key → save the downloaded file as `firebase-service-account.json` in the project root
+2. Project Settings → General → Add app → Web (`</>`) → copy the `firebaseConfig` into the `<script type="module">` block in `index.html`
+3. Project Settings → Service Accounts → Generate new private key → save the downloaded file as `firebase-service-account.json` in the project root (local dev only)
 
----
-
-## Configuration
+### Configuration
 
 Create a `.env` file at the project root:
 
@@ -195,9 +199,7 @@ QDRANT_API_KEY=your_qdrant_api_key_here
 
 Other settings (chunk size, retrieval top-k, RAGAS thresholds, etc.) have defaults in `configs/settings.py` and can be overridden there or via environment variables.
 
----
-
-## Running
+### Run locally
 
 ```bash
 python main.py
@@ -205,18 +207,28 @@ python main.py
 
 - API: `http://localhost:8000`
 - Interactive API docs: `http://localhost:8000/docs`
-- UI: open `docmind_ui.html` directly in your browser, sign up / log in, then upload documents
+- UI: serve `index.html` over local HTTP (e.g. `python -m http.server 5500`) and open it — Firebase's SDK requires `http://`, not `file://`
+
+---
+
+## Deployment
+
+- **Backend** runs on **Railway** (persistent container — needed because ML models, i.e. the sentence-transformers reranker and BM25 index, load into memory at startup and stay warm; a serverless platform would reload them on every cold start).
+  - Port is read from the `PORT` environment variable Railway injects.
+  - Firebase credentials are supplied via a `FIREBASE_SERVICE_ACCOUNT_JSON` environment variable (the full service-account JSON as one value) instead of a committed file.
+  - Required Railway env vars: `GROQ_API_KEY`, `QDRANT_URL`, `QDRANT_API_KEY`, `FIREBASE_SERVICE_ACCOUNT_JSON`.
+- **Frontend** (`index.html`) is deployed as a static site on **Vercel**, pointed at the Railway backend URL via the `API` constant in the file.
 
 ---
 
 ## API Endpoints
 
-All endpoints below (except `/health`) require a Firebase ID token: `Authorization: Bearer <token>`. `docmind_ui.html` attaches this automatically once you're logged in.
+All endpoints below (except `/health`) require a Firebase ID token: `Authorization: Bearer <token>`. `index.html` attaches this automatically once you're logged in.
 
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/health` | Health check (no auth) |
-| `POST` | `/upload` | Upload a PDF/TXT/MD/DOCX document |
+| `POST` | `/upload` | Upload a PDF/TXT/MD/DOCX document. Pass `session_id` to add to an existing session instead of creating a new one |
 | `POST` | `/ask` | Ask a question against a session's documents (`run_evaluation: true` to also run RAGAS + decision layer) |
 | `POST` | `/evaluate` | Run on-demand RAGAS evaluation on a previously generated answer, by `trace_id` (cached on repeat) |
 | `GET` | `/sessions` | List sessions belonging to the current user |
@@ -226,7 +238,7 @@ All endpoints below (except `/health`) require a Firebase ID token: `Authorizati
 ### Example: Ask a question
 
 ```bash
-curl -X POST http://localhost:8000/ask \
+curl -X POST https://document-based-retrieval-system-production.up.railway.app/ask \
   -H "Authorization: Bearer <firebase-id-token>" \
   -H "Content-Type: application/json" \
   -d '{"session_id": "your-session-id", "question": "What are the key findings?"}'
@@ -235,7 +247,7 @@ curl -X POST http://localhost:8000/ask \
 ### Example: Evaluate an answer
 
 ```bash
-curl -X POST http://localhost:8000/evaluate \
+curl -X POST https://document-based-retrieval-system-production.up.railway.app/evaluate \
   -H "Authorization: Bearer <firebase-id-token>" \
   -H "Content-Type: application/json" \
   -d '{"session_id": "your-session-id", "trace_id": "trace-id-from-ask-response"}'
@@ -270,7 +282,7 @@ Test suite covers query rewriting, decision layer logic, RAGAS error handling/ba
 
 ## Logging
 
-Structured JSON logs are written to `logs/rag.log`, covering ingestion, retrieval, reranking, generation, and evaluation stages.
+Structured JSON logs are written to `logs/rag.log` locally, and to stdout (captured by Railway) in production — covering ingestion, retrieval, reranking, generation, and evaluation stages.
 
 ---
 
@@ -279,10 +291,9 @@ Structured JSON logs are written to `logs/rag.log`, covering ingestion, retrieva
 Excluded from the repository via `.gitignore`:
 
 - `.env` — API keys (Groq, Qdrant)
-- `firebase-service-account.json` — Firebase Admin SDK credentials
+- `firebase-service-account.json` — Firebase Admin SDK credentials (local dev only; production uses the `FIREBASE_SERVICE_ACCOUNT_JSON` env var)
 - `.venv/`
-- `storage/users.db` (legacy, unused — see Known Limitations)
-- `logs/`
+- `storage/`, `logs/` — runtime-generated, not source
 
 Never commit `.env` or `firebase-service-account.json`.
 
@@ -293,7 +304,7 @@ Never commit `.env` or `firebase-service-account.json`.
 - RETRY and FALLBACK decision-layer outcomes are logged but not yet acted upon — no automatic re-retrieval or model-switching loop yet
 - `FALLBACK_LLM_MODEL` is not configured by default; fallback decisions currently fall through to ACCEPT
 - Evaluation is single-turn only (no multi-turn conversation evaluation)
-- Not yet deployed — designed to run with the FastAPI backend on a persistent host (Render/Railway/Fly.io) and `docmind_ui.html` on Vercel; not suited to serverless deployment as-is due to in-memory ML model loading (sentence-transformers reranker, BM25 index) at startup
+- No automated CI pipeline currently runs the test suite on push — tests must be run manually
 
 ---
 
