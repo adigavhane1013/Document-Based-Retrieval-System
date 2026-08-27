@@ -112,10 +112,10 @@ class HybridRetriever:
                 f"No docs passed threshold={settings.RETRIEVAL_SCORE_THRESHOLD} "
                 f"(top={top_raw}) for: {query[:80]}"
             )
-            return [], []
-        
-        dense_docs = [d for d, _ in dense_filtered]
-        logger.info(f"{len(dense_docs)} docs passed threshold")
+            dense_docs = []
+        else:
+            dense_docs = [d for d, _ in dense_filtered]
+            logger.info(f"{len(dense_docs)} docs passed threshold")
         
         # ── Sparse retrieval (BM25 keyword search) ────────────────────────────
         sparse_docs = self._bm25.invoke(query)

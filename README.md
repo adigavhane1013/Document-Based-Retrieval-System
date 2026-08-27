@@ -66,7 +66,7 @@ Hybrid Retrieval (Dense + BM25)
 Cross-Encoder Reranker
         │
         ▼
-Groq llama-3.3-70b-versatile → grounded answer + citations
+openai/gpt-oss-120b → grounded answer + citations
         │
         ▼
 Hallucination filter → grounding score
@@ -87,7 +87,7 @@ Answer + sources + grounding score (+ evaluation, if requested) returned
 | UI | HTML/CSS/JS (`index.html`) — deployed on Vercel |
 | Backend | FastAPI, Uvicorn — deployed on Railway |
 | Auth | Firebase Authentication (email/password) |
-| LLM | Groq — `llama-3.3-70b-versatile` |
+| LLM | Groq — `openai/gpt-oss-120b` |
 | Embeddings | HuggingFace — `BAAI/bge-small-en-v1.5` |
 | Orchestration | LangChain |
 | Vector Store | Qdrant Cloud (collection per session) |

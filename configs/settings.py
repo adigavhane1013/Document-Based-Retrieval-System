@@ -106,7 +106,7 @@ class Settings(BaseSettings):
     QUERY_MIN_LENGTH: int = 5
     QUERY_MAX_REWRITE_LENGTH: int = 150
     # FIXED: Changed from "llama-3.1-8b-instant" (NOT available on Groq)
-    # to "llama-3.3-70b-versatile" (actual available model on Groq API)
+    # to "openai/gpt-oss-120b" (actual available model on Groq API)
     # Issue: API calls to 3.1-8b-instant were failing silently
     # Result: Query rewriting now actually works instead of returning original query
     QUERY_REWRITE_MODEL: str = "openai/gpt-oss-120b"
