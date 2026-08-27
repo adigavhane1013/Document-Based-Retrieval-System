@@ -40,12 +40,12 @@ class Settings(BaseSettings):
     # ── Auth ──────────────────────────────────────────────────
     JWT_SECRET_KEY: str = Field(default="change-me-in-production", validation_alias="JWT_SECRET_KEY")
     LLM_API_BASE: str = "https://api.groq.com/openai/v1"
-    LLM_MODEL: str = "llama-3.3-70b-versatile"
+    LLM_MODEL: str = "openai/gpt-oss-120b"
     LLM_TEMPERATURE: float = 0.0
     LLM_MAX_TOKENS: int = 1024
 
     # ── RAGAS Evaluation (Groq) ───────────────────────────────
-    RAGAS_EVAL_MODEL: str = "llama-3.3-70b-versatile"
+    RAGAS_EVAL_MODEL: str = "openai/gpt-oss-120b"
     RAGAS_API_BASE: str = "https://api.groq.com/openai/v1"
     RAGAS_MAX_TOKENS: int = 1024
     # NOTE: CHUNK_SIZE below is in TOKENS (~1024 tokens ≈ 4000-4500 chars for
@@ -109,7 +109,7 @@ class Settings(BaseSettings):
     # to "llama-3.3-70b-versatile" (actual available model on Groq API)
     # Issue: API calls to 3.1-8b-instant were failing silently
     # Result: Query rewriting now actually works instead of returning original query
-    QUERY_REWRITE_MODEL: str = "llama-3.3-70b-versatile"
+    QUERY_REWRITE_MODEL: str = "openai/gpt-oss-120b"
 
     # ── RAGAS Decision Layer (Phase 1 - Feature 2) ────────────
     RAGAS_FAITHFULNESS_THRESHOLD: float = 0.70
