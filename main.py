@@ -379,9 +379,15 @@ def ask_question(
 
     try:
         session = rag_sessions[request.session_id]
-        
+
+        # One trace_id per question/answer turn — reused below if the
+        # pipeline is re-run with eval_scores, so /evaluate can find this
+        # exact turn later regardless of how many other questions this
+        # session has. Must NOT be session_id (that repeats every turn).
+        trace_id = str(uuid.uuid4())
+
         # ── Run pipeline (no evaluation yet) ────────────────────────────────
-        result: RAGResponse = run_pipeline(session, request.question)
+        result: RAGResponse = run_pipeline(session, request.question, trace_id=trace_id)
         timestamp = datetime.now().isoformat()
 
         # ── Optional: Run RAGAS evaluation and re-run decision layer ────────
@@ -426,6 +432,7 @@ def ask_question(
                             session, 
                             request.question,
                             eval_scores=eval_scores,
+                            trace_id=trace_id,
                         )
                         
                         # Use decision-enhanced result

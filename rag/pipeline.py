@@ -14,6 +14,7 @@ Pipeline steps:
     7. Return    — structured response with trace metadata
 """
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -83,6 +84,7 @@ def run_pipeline(
     session: RAGSession, 
     question: str,
     eval_scores: Optional[Dict[str, float]] = None,
+    trace_id: Optional[str] = None,
 ) -> RAGResponse:
     """
     Full RAG pipeline with integrated decision layer.
@@ -92,11 +94,19 @@ def run_pipeline(
         question: User question
         eval_scores: Optional RAGAS scores (faithfulness, answer_relevancy)
                     If provided, triggers decision layer logic
+        trace_id: Unique ID for this specific question/answer turn. If not
+                  provided, one is generated. Callers that re-run the pipeline
+                  for the SAME turn (e.g. once without eval, once with eval
+                  scores to re-decide) must pass the same trace_id both times,
+                  otherwise /evaluate can't find the stored message later.
+                  NOTE: this must be unique per question, NOT per session —
+                  session_id identifies the conversation, trace_id identifies
+                  one turn within it.
     
     Returns:
         RAGResponse with answer, grounding score, sources, and decision metadata
     """
-    trace_id = str(session.session_id)
+    trace_id = trace_id or str(uuid.uuid4())
     
     # ─── Query Rewriting ──────────────────────────────────────────────────────
     rewritten_query, rewrite_metadata = rewrite_with_logging(question)
