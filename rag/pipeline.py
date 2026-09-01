@@ -2,7 +2,6 @@
 rag/pipeline.py
 
 The orchestration layer — the only file that imports from all other modules.
-Every step is logged via logger, not trace methods.
 
 Pipeline steps:
     1. Retrieve  — hybrid dense + BM25 search
@@ -14,9 +13,13 @@ Pipeline steps:
                    (Accept/Retry/Fallback/Reject)
     7. Return    — structured response with trace metadata
 
-P0-002:
-    RETRY and FALLBACK decisions are actively executed instead of
-    merely being logged.
+RETRY behavior:
+    - Build a broader RetrievalConfig
+    - Retrieve again
+    - Rerank again
+    - Generate a new answer
+    - Re-evaluate the new answer with RAGAS
+    - Run the decision layer again
 """
 
 import uuid
@@ -28,21 +31,33 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.documents import Document
 
 from configs.settings import settings
+
 from retrieval.retriever import HybridRetriever
+from retrieval.config import RetrievalConfig
 from retrieval.reranker import rerank
+
 from rag.prompt import (
     build_context_block,
     RAG_PROMPT,
     SYSTEM_MESSAGE,
 )
+
 from guardrails.hallucination_filter import check_response
+
 from observability.logger import get_logger
+
 from rag.query_rewriter import rewrite_with_logging
 from rag.decision_layer import DecisionLayer
+
 from evaluation.ragas_eval import run_ragas_evaluation
 
 
 logger = get_logger("rag.pipeline")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# RAG SESSION
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -52,7 +67,9 @@ class RAGSession:
     all_chunks: List[Document] = field(default_factory=list)
 
 
-# ── LLM factory ────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# LLM FACTORY
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 def _get_llm(
@@ -76,7 +93,9 @@ def _get_llm(
     )
 
 
-# ── Response model ────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# RESPONSE MODEL
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -90,7 +109,9 @@ class RAGResponse:
     decision_metadata: Optional[Dict] = None
 
 
-# ── Source helper ──────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# SOURCE HELPER
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 def _build_sources(
@@ -111,7 +132,26 @@ def _build_sources(
     ]
 
 
-# ── Answer generation ─────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# RETRIEVAL CONFIG HELPERS
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _get_initial_retrieval_config() -> RetrievalConfig:
+    """
+    Build the retrieval configuration for the initial attempt.
+    """
+
+    return RetrievalConfig(
+        top_k_dense=settings.TOP_K_DENSE,
+        top_k_sparse=settings.TOP_K_SPARSE,
+        score_threshold=settings.RETRIEVAL_SCORE_THRESHOLD,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ANSWER GENERATION
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 def _generate_answer(
@@ -122,8 +162,23 @@ def _generate_answer(
     """
     Build context, call the LLM, and run the hallucination filter.
 
-    model:
-        Optional model override used by FALLBACK.
+    Args:
+        question:
+            Original user question.
+
+        docs:
+            Documents used to build the grounded context.
+
+        model:
+            Optional model override used by FALLBACK.
+
+    Returns:
+        Tuple containing:
+
+            final_answer
+            is_grounded
+            grounding_score
+            context_block
     """
 
     context_block = build_context_block(
@@ -216,7 +271,9 @@ def _generate_answer(
     )
 
 
-# ── Main pipeline ──────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# MAIN PIPELINE
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 def run_pipeline(
@@ -230,16 +287,15 @@ def run_pipeline(
     """
     Execute the complete RAG pipeline.
 
-    P0-002 behavior:
-
-    RETRY
+    RETRY:
         Increase retrieval breadth, retrieve again,
-        rerank again, regenerate the answer, and evaluate
-        the new answer through the decision layer.
+        rerank again, regenerate the answer, and
+        evaluate the new answer through RAGAS.
 
-    FALLBACK
-        Switch to settings.FALLBACK_LLM_MODEL and regenerate
-        the answer using the existing retrieved context.
+    FALLBACK:
+        Switch to settings.FALLBACK_LLM_MODEL and
+        regenerate the answer using the existing
+        retrieved context.
     """
 
     trace_id = (
@@ -247,7 +303,9 @@ def run_pipeline(
         or str(uuid.uuid4())
     )
 
-    # ── Query rewriting ──────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────────────
+    # QUERY REWRITING
+    # ──────────────────────────────────────────────────────────────────────────
 
     (
         rewritten_query,
@@ -266,12 +324,20 @@ def run_pipeline(
 
     try:
 
-        # ── Step 1: Initial retrieval ────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
+        # STEP 1: INITIAL RETRIEVAL
+        # ──────────────────────────────────────────────────────────────────────
 
-        docs, scores = (
-            session.retriever.retrieve(
-                rewritten_query
-            )
+        initial_retrieval_config = (
+            _get_initial_retrieval_config()
+        )
+
+        (
+            docs,
+            scores,
+        ) = session.retriever.retrieve(
+            rewritten_query,
+            initial_retrieval_config,
         )
 
         if not docs:
@@ -296,7 +362,9 @@ def run_pipeline(
             f"Retrieved {len(docs)} docs"
         )
 
-        # ── Step 2: Rerank ───────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
+        # STEP 2: RERANK
+        # ──────────────────────────────────────────────────────────────────────
 
         reranked_docs = rerank(
             question,
@@ -309,7 +377,9 @@ def run_pipeline(
             f"{len(reranked_docs)} docs"
         )
 
-        # ── Step 3-5: Generate + validate ───────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
+        # STEP 3-5: GENERATE + VALIDATE
+        # ──────────────────────────────────────────────────────────────────────
 
         (
             final_answer,
@@ -323,7 +393,9 @@ def run_pipeline(
 
         decision_metadata = None
 
-        # ── Step 6: Decision Layer ───────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
+        # STEP 6: DECISION LAYER
+        # ──────────────────────────────────────────────────────────────────────
 
         if eval_scores:
 
@@ -341,7 +413,9 @@ def run_pipeline(
 
                 while True:
 
-                    # ── Evaluate current answer ─────────────────────────────
+                    # ──────────────────────────────────────────────────────────
+                    # EVALUATE CURRENT ANSWER
+                    # ──────────────────────────────────────────────────────────
 
                     (
                         decided_answer,
@@ -369,14 +443,16 @@ def run_pipeline(
                     logger.info(
                         f"Decision: "
                         f"{decision_type} | "
-                        f"Attempt: {attempt} | "
+                        f"Attempt: {attempt}/{max_attempts} | "
                         f"Faithfulness: "
                         f"{eval_scores.get('faithfulness', 0.0):.2f} | "
                         f"Relevance: "
                         f"{eval_scores.get('answer_relevancy', 0.0):.2f}"
                     )
 
-                    # ── ACCEPT ──────────────────────────────────────────────
+                    # ──────────────────────────────────────────────────────────
+                    # ACCEPT
+                    # ──────────────────────────────────────────────────────────
 
                     if decision_type == "ACCEPT":
 
@@ -390,7 +466,9 @@ def run_pipeline(
 
                         break
 
-                    # ── REJECT ──────────────────────────────────────────────
+                    # ──────────────────────────────────────────────────────────
+                    # REJECT
+                    # ──────────────────────────────────────────────────────────
 
                     if decision_type == "REJECT":
 
@@ -416,7 +494,9 @@ def run_pipeline(
                             ),
                         )
 
-                    # ── RETRY ────────────────────────────────────────────────
+                    # ──────────────────────────────────────────────────────────
+                    # RETRY
+                    # ──────────────────────────────────────────────────────────
 
                     if decision_type == "RETRY":
 
@@ -427,32 +507,26 @@ def run_pipeline(
                         )
 
                         logger.info(
-                            f"RETRY triggered | "
-                            f"top_k="
-                            f"{retry_config['top_k']} | "
+                            "RETRY triggered | "
+                            f"attempt={attempt} | "
+                            f"dense_k="
+                            f"{retry_config.top_k_dense} | "
+                            f"sparse_k="
+                            f"{retry_config.top_k_sparse} | "
                             f"threshold="
-                            f"{retry_config['score_threshold']} | "
-                            f"max_context="
-                            f"{retry_config['max_context_chunks']}"
+                            f"{retry_config.score_threshold}"
                         )
 
-                        # Retrieve more documents.
+                        # ──────────────────────────────────────────────────────
+                        # RETRIEVE AGAIN
+                        # ──────────────────────────────────────────────────────
 
                         (
                             retry_docs,
                             retry_scores,
-                        ) = (
-                            session.retriever.retrieve(
-                                rewritten_query,
-                                top_k=retry_config[
-                                    "top_k"
-                                ],
-                                score_threshold=(
-                                    retry_config[
-                                        "score_threshold"
-                                    ]
-                                ),
-                            )
+                        ) = session.retriever.retrieve(
+                            rewritten_query,
+                            retry_config,
                         )
 
                         if not retry_docs:
@@ -463,9 +537,7 @@ def run_pipeline(
                             )
 
                             return RAGResponse(
-                                answer=(
-                                    settings.REFUSAL_MESSAGE
-                                ),
+                                answer=settings.REFUSAL_MESSAGE,
                                 is_grounded=False,
                                 grounding_score=0.0,
                                 sources=_build_sources(
@@ -478,15 +550,14 @@ def run_pipeline(
                                 ),
                             )
 
-                        # Limit context size before reranking.
+                        logger.info(
+                            "RETRY retrieval returned "
+                            f"{len(retry_docs)} docs"
+                        )
 
-                        retry_docs = retry_docs[
-                            : retry_config[
-                                "max_context_chunks"
-                            ]
-                        ]
-
-                        # Rerank the expanded result set.
+                        # ──────────────────────────────────────────────────────
+                        # RERANK AGAIN
+                        # ──────────────────────────────────────────────────────
 
                         reranked_docs = rerank(
                             question,
@@ -498,13 +569,13 @@ def run_pipeline(
                         )
 
                         logger.info(
-                            f"RETRY retrieved "
-                            f"{len(retry_docs)} docs and "
-                            f"reranked to "
+                            "RETRY reranked "
                             f"{len(reranked_docs)} docs"
                         )
 
-                        # Generate a new answer.
+                        # ──────────────────────────────────────────────────────
+                        # GENERATE AGAIN
+                        # ──────────────────────────────────────────────────────
 
                         (
                             final_answer,
@@ -516,11 +587,21 @@ def run_pipeline(
                             reranked_docs,
                         )
 
-                        # ── Re-evaluate the NEW answer with RAGAS ─────────────
-                        # The previous eval_scores belong to the previous answer.
-                        # After RETRY we must evaluate the newly generated answer
-                        # against the newly retrieved context before making the
-                        # next decision.
+                        logger.info(
+                            "RETRY generated a new answer"
+                        )
+
+                        # ──────────────────────────────────────────────────────
+                        # RAGAS RE-EVALUATION
+                        # ──────────────────────────────────────────────────────
+                        #
+                        # The old eval_scores belong to the OLD answer.
+                        #
+                        # We must evaluate the new answer against the
+                        # new retrieved context before making another
+                        # decision.
+                        # ──────────────────────────────────────────────────────
+
                         retry_contexts = [
                             doc.page_content
                             for doc in reranked_docs
@@ -528,6 +609,7 @@ def run_pipeline(
                         ]
 
                         if not retry_contexts:
+
                             logger.error(
                                 "RAGAS re-evaluation skipped: "
                                 "RETRY produced no usable contexts"
@@ -536,18 +618,25 @@ def run_pipeline(
                             decision_metadata = dict(
                                 decision_metadata or {}
                             )
+
                             decision_metadata[
                                 "reevaluation_error"
-                            ] = "No usable contexts after RETRY"
+                            ] = (
+                                "No usable contexts after RETRY"
+                            )
 
                             return RAGResponse(
                                 answer=final_answer,
                                 is_grounded=is_grounded,
                                 grounding_score=grounding_score,
-                                sources=_build_sources(reranked_docs),
+                                sources=_build_sources(
+                                    reranked_docs
+                                ),
                                 trace_id=trace_id,
                                 refused=not is_grounded,
-                                decision_metadata=decision_metadata,
+                                decision_metadata=(
+                                    decision_metadata
+                                ),
                             )
 
                         retry_test_case = {
@@ -557,18 +646,25 @@ def run_pipeline(
                         }
 
                         try:
-                            retry_eval_result = run_ragas_evaluation(
-                                [retry_test_case]
+
+                            retry_eval_result = (
+                                run_ragas_evaluation(
+                                    [retry_test_case]
+                                )
                             )
+
                         except Exception as eval_error:
+
                             logger.error(
-                                f"RAGAS re-evaluation failed after RETRY: "
+                                "RAGAS re-evaluation "
+                                "failed after RETRY: "
                                 f"{eval_error}"
                             )
 
                             decision_metadata = dict(
                                 decision_metadata or {}
                             )
+
                             decision_metadata[
                                 "reevaluation_error"
                             ] = str(eval_error)
@@ -577,31 +673,54 @@ def run_pipeline(
                                 answer=final_answer,
                                 is_grounded=is_grounded,
                                 grounding_score=grounding_score,
-                                sources=_build_sources(reranked_docs),
+                                sources=_build_sources(
+                                    reranked_docs
+                                ),
                                 trace_id=trace_id,
                                 refused=not is_grounded,
-                                decision_metadata=decision_metadata,
+                                decision_metadata=(
+                                    decision_metadata
+                                ),
                             )
 
+                        # ──────────────────────────────────────────────────────
+                        # VALIDATE RAGAS RESULT
+                        # ──────────────────────────────────────────────────────
+
                         if (
-                            retry_eval_result.get("error")
-                            or retry_eval_result.get("evaluated_cases", 0) == 0
-                            or retry_eval_result.get("faithfulness") is None
-                            or retry_eval_result.get("answer_relevancy") is None
+                            retry_eval_result.get(
+                                "error"
+                            )
+                            or retry_eval_result.get(
+                                "evaluated_cases",
+                                0,
+                            ) == 0
+                            or retry_eval_result.get(
+                                "faithfulness"
+                            ) is None
+                            or retry_eval_result.get(
+                                "answer_relevancy"
+                            ) is None
                         ):
-                            error_message = retry_eval_result.get(
-                                "error",
-                                "RAGAS returned no complete evaluation scores",
+
+                            error_message = (
+                                retry_eval_result.get(
+                                    "error",
+                                    "RAGAS returned no complete "
+                                    "evaluation scores",
+                                )
                             )
 
                             logger.error(
-                                "RAGAS re-evaluation returned invalid results: "
+                                "RAGAS re-evaluation "
+                                "returned invalid results: "
                                 f"{error_message}"
                             )
 
                             decision_metadata = dict(
                                 decision_metadata or {}
                             )
+
                             decision_metadata[
                                 "reevaluation_error"
                             ] = error_message
@@ -610,40 +729,52 @@ def run_pipeline(
                                 answer=final_answer,
                                 is_grounded=is_grounded,
                                 grounding_score=grounding_score,
-                                sources=_build_sources(reranked_docs),
+                                sources=_build_sources(
+                                    reranked_docs
+                                ),
                                 trace_id=trace_id,
                                 refused=not is_grounded,
-                                decision_metadata=decision_metadata,
+                                decision_metadata=(
+                                    decision_metadata
+                                ),
                             )
+
+                        # ──────────────────────────────────────────────────────
+                        # UPDATE SCORES
+                        # ──────────────────────────────────────────────────────
 
                         eval_scores = {
                             "faithfulness": float(
-                                retry_eval_result["faithfulness"]
+                                retry_eval_result[
+                                    "faithfulness"
+                                ]
                             ),
                             "answer_relevancy": float(
-                                retry_eval_result["answer_relevancy"]
+                                retry_eval_result[
+                                    "answer_relevancy"
+                                ]
                             ),
                         }
 
                         logger.info(
                             "RAGAS re-evaluation after RETRY: "
-                            f"Faithfulness: {eval_scores['faithfulness']:.2f} | "
-                            f"Relevance: {eval_scores['answer_relevancy']:.2f}"
+                            f"Faithfulness="
+                            f"{eval_scores['faithfulness']:.2f} | "
+                            f"Relevance="
+                            f"{eval_scores['answer_relevancy']:.2f}"
                         )
 
-                        # Move to the next decision attempt. The next iteration
-                        # now evaluates the NEW answer using its NEW RAGAS scores.
+                        # ──────────────────────────────────────────────────────
+                        # NEXT ATTEMPT
+                        # ──────────────────────────────────────────────────────
+
                         attempt += 1
-
-                        if attempt > max_attempts:
-
-                            attempt = (
-                                max_attempts
-                            )
 
                         continue
 
-                    # ── FALLBACK ─────────────────────────────────────────────
+                    # ──────────────────────────────────────────────────────────
+                    # FALLBACK
+                    # ──────────────────────────────────────────────────────────
 
                     if decision_type == "FALLBACK":
 
@@ -659,9 +790,7 @@ def run_pipeline(
                             )
 
                             return RAGResponse(
-                                answer=(
-                                    settings.REFUSAL_MESSAGE
-                                ),
+                                answer=settings.REFUSAL_MESSAGE,
                                 is_grounded=False,
                                 grounding_score=0.0,
                                 sources=_build_sources(
@@ -675,12 +804,12 @@ def run_pipeline(
                             )
 
                         logger.info(
-                            f"FALLBACK triggered. "
-                            f"Switching to model: "
+                            "FALLBACK triggered. "
+                            "Switching to model: "
                             f"{fallback_model}"
                         )
 
-                        # Generate using the fallback model.
+                        # Generate using fallback model.
 
                         (
                             final_answer,
@@ -711,14 +840,15 @@ def run_pipeline(
                         )
 
                         # Fallback is intentionally one-shot.
-                        # We do not repeatedly switch models.
 
                         break
 
-                    # ── Unknown decision ────────────────────────────────────
+                    # ──────────────────────────────────────────────────────────
+                    # UNKNOWN DECISION
+                    # ──────────────────────────────────────────────────────────
 
                     logger.warning(
-                        f"Unknown decision type: "
+                        "Unknown decision type: "
                         f"{decision_type}"
                     )
 
@@ -731,13 +861,15 @@ def run_pipeline(
             except Exception as e:
 
                 logger.error(
-                    f"Decision layer error "
+                    "Decision layer error "
                     f"(returning current answer): {e}"
                 )
 
                 decision_metadata = None
 
-        # ── Step 7: Build response ───────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
+        # STEP 7: BUILD RESPONSE
+        # ──────────────────────────────────────────────────────────────────────
 
         sources = _build_sources(
             reranked_docs
