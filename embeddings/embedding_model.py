@@ -42,7 +42,11 @@ def get_embedding_model() -> HuggingFaceEmbeddings:
     embeddings = HuggingFaceEmbeddings(
         model_name=settings.EMBEDDING_MODEL,
         model_kwargs={
-            "device": settings.EMBEDDING_DEVICE,
+            "device": getattr(
+                settings,
+                "EMBEDDING_DEVICE",
+                "cpu",
+            ),
         },
         encode_kwargs={
             "normalize_embeddings": True,

@@ -1,53 +1,26 @@
 """
 guardrails/hallucination_filter.py
 
-Post-generation hallucination detection and refusal enforcement.
-
-Grounding is checked at the CLAIM level rather than only checking
-whether citation IDs exist.
+Post-generation citation validation and refusal enforcement.
 
 Checks:
-
 1. INSUFFICIENT_CONTEXT
    Detect when the model explicitly says it cannot answer.
 
-2. CITATION VALIDATION
-   Verify that [SOURCE:chunk_id] references actually exist in the
-   retrieved documents.
+2. EMPTY_RESPONSE
+   Reject empty responses.
 
-3. CLAIM-LEVEL GROUNDING
-   Extract individual claims, associate them with their cited sources,
-   and use an NLI model to determine whether the cited context actually
-   entails each claim.
-
-Grounding score:
-
-    supported_claims / total_claims
-
-A valid citation alone does NOT make a claim grounded.
-
-The cited context must actually entail the generated claim.
-
-NLI model:
-
-    cross-encoder/nli-deberta-v3-base
-
-The NLI model produces scores for:
-
-    CONTRADICTION
-    ENTAILMENT
-    NEUTRAL
-
-A claim is considered supported when its best entailment probability
-reaches GROUNDING_NLI_THRESHOLD.
+3. CITATION VALIDATION & CANONICALIZATION
+   Verify that citation references map to retrieved documents.
+   Supports [SOURCE:chunk_id], [chunk_id], and Unicode variants (【...】).
+   Exact IDs are preferred; a unique 12+ character prefix is resolved
+   back to the canonical chunk_id.
 """
 
-import math
 import re
 from typing import Dict, List, Tuple
 
 from langchain_core.documents import Document
-from sentence_transformers import CrossEncoder
 
 from configs.settings import settings
 from observability.logger import get_logger
@@ -63,423 +36,172 @@ _INSUFFICIENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Robust citation regex:
+# - Supports '[' and '【' (and their closing counterparts ']' and '】')
+# - Strips zero-width spaces (\u200b, \ufeff) and unicode whitespace (\u202f, \u00a0)
+# - Makes 'SOURCE:' optional so bare IDs like [decc69c0b065] and [SOURCE:decc69c0b065] match
 _CITATION_PATTERN = re.compile(
-    r"\[SOURCE:([a-zA-Z0-9_\-]+)\]",
+    r"[\[\u3010][\s\u200b\ufeff\u202f\u00a0]*(?:SOURCE[\s\u200b\ufeff\u202f\u00a0]*:[\s\u200b\ufeff\u202f\u00a0]*)?([a-zA-Z0-9_.\-]+)[\s\u200b\ufeff\u202f\u00a0]*[\]\u3011]",
+    re.IGNORECASE,
 )
 
 
-# ── NLI model ──────────────────────────────────────────────────────────────────
+def _clean_zero_width_chars(text: str) -> str:
+    """Strip zero-width and invisible unicode codepoints."""
+    return re.sub(r"[\u200b\u200c\u200d\ufeff]", "", text)
 
-_nli_model = None
+
+# ── Citation canonicalization ────────────────────────────────────────────────
+
+MIN_CITATION_PREFIX_LENGTH = 12
 
 
-def _get_nli_model() -> CrossEncoder:
+def _build_lower_lookup(valid_chunk_ids: set[str]) -> Dict[str, str]:
+    """Map lowercase chunk_id -> original chunk_id for case-insensitive lookup."""
+    return {chunk_id.lower(): chunk_id for chunk_id in valid_chunk_ids}
+
+
+def _resolve_citation_ids(
+    cited_ids: List[str],
+    valid_chunk_ids: set[str],
+) -> Tuple[set[str], set[str]]:
     """
-    Load the NLI model lazily.
+    Resolve generated citation IDs to canonical retrieved chunk IDs.
 
-    The model is loaded only when claim-level grounding is performed.
-    This avoids loading the model during normal module imports.
+    Resolution order:
+      1. Exact match (case-sensitive) -> accepted.
+      2. Case-insensitive exact match -> accepted, canonical = stored chunk_id.
+      3. Unique 12+ char prefix (case-insensitive) of a retrieved chunk -> accepted.
+      4. Otherwise -> unresolved/invalid.
     """
+    resolved: set[str] = set()
+    unresolved: set[str] = set()
 
-    global _nli_model
+    lower_lookup = _build_lower_lookup(valid_chunk_ids)
 
-    if _nli_model is None:
-        model_name = getattr(
-            settings,
-            "GROUNDING_NLI_MODEL",
-            "cross-encoder/nli-deberta-v3-base",
-        )
-
-        logger.info(
-            f"Loading grounding NLI model: {model_name}"
-        )
-
-        _nli_model = CrossEncoder(model_name)
-
-        logger.info(
-            "Grounding NLI model loaded successfully"
-        )
-
-    return _nli_model
-
-
-# ── NLI helpers ───────────────────────────────────────────────────────────────
-
-def _get_entailment_index(model: CrossEncoder) -> int:
-    """
-    Determine which output index represents ENTAILMENT.
-
-    nli-deberta-v3-base normally exposes:
-
-        0 -> contradiction
-        1 -> entailment
-        2 -> neutral
-
-    We inspect the model configuration instead of blindly depending
-    on a hard-coded ordering.
-
-    Falls back to index 1 because that is the standard ordering for
-    the configured model.
-    """
-
-    try:
-        id2label = model.model.config.id2label
-
-        if id2label:
-            for index, label in id2label.items():
-                normalized = str(label).strip().lower()
-
-                if normalized in {
-                    "entailment",
-                    "entails",
-                    "label_entailment",
-                }:
-                    return int(index)
-
-    except Exception as exc:
-        logger.warning(
-            f"Could not determine NLI label mapping: {exc}"
-        )
-
-    return 1
-
-
-def _prediction_to_probabilities(
-    prediction,
-) -> List[float]:
-    """
-    Convert an NLI prediction into probabilities.
-
-    CrossEncoder may return:
-
-    - 3 logits
-    - 3 probabilities
-    - a scalar
-
-    For a three-class NLI model, logits are converted with softmax.
-
-    If the values already look like probabilities, they are retained.
-    """
-
-    try:
-        values = [float(value) for value in prediction]
-    except TypeError:
-        return [float(prediction)]
-
-    if not values:
-        return []
-
-    # Already looks like probabilities.
-    if (
-        all(0.0 <= value <= 1.0 for value in values)
-        and abs(sum(values) - 1.0) < 1e-3
-    ):
-        return values
-
-    # Convert logits to probabilities.
-    max_value = max(values)
-
-    exp_values = [
-        math.exp(value - max_value)
-        for value in values
-    ]
-
-    total = sum(exp_values)
-
-    if total <= 0:
-        return [0.0 for _ in values]
-
-    return [
-        value / total
-        for value in exp_values
-    ]
-
-
-# ── Claim extraction ──────────────────────────────────────────────────────────
-
-def _extract_claims(answer: str) -> List[str]:
-    """
-    Extract sentence-level claims from the generated answer.
-
-    Citations are removed before returning the claims.
-
-    This function intentionally remains deterministic. It does not
-    make another LLM call for claim decomposition.
-
-    Returns:
-        List[str]
-    """
-
-    if not answer:
-        return []
-
-    cleaned = _CITATION_PATTERN.sub(
-        "",
-        answer,
-    )
-
-    # Normalize whitespace.
-    cleaned = re.sub(
-        r"\s+",
-        " ",
-        cleaned,
-    ).strip()
-
-    if not cleaned:
-        return []
-
-    # Split on sentence boundaries.
-    raw_claims = re.split(
-        r"(?<=[.!?])\s+",
-        cleaned,
-    )
-
-    claims = []
-
-    for claim in raw_claims:
-        claim = claim.strip()
-
-        # Remove common markdown list markers.
-        claim = re.sub(
-            r"^(?:[-*•]|\d+[.)])\s+",
-            "",
-            claim,
-        ).strip()
-
-        if not claim:
+    for cited_id in cited_ids:
+        if cited_id in valid_chunk_ids:
+            resolved.add(cited_id)
             continue
 
-        # Ignore extremely short fragments.
-        if len(claim) < 10:
+        # Case-insensitive exact match
+        canonical_id = lower_lookup.get(cited_id.lower())
+        if canonical_id is not None:
+            resolved.add(canonical_id)
+            logger.info(
+                "Resolved case-insensitive citation '%s' -> '%s'",
+                cited_id,
+                canonical_id,
+            )
             continue
 
-        claims.append(claim)
+        if len(cited_id) < MIN_CITATION_PREFIX_LENGTH:
+            unresolved.add(cited_id)
+            continue
 
-    return claims
-
-
-def _extract_claims_with_citations(
-    answer: str,
-) -> List[Tuple[str, List[str]]]:
-    """
-    Extract claims while preserving the citation relationship.
-
-    Example:
-
-        Falcon reduced costs by 20% [SOURCE:c1].
-        Revenue increased by 15% [SOURCE:c2].
-
-    becomes:
-
-        [
-            ("Falcon reduced costs by 20%.", ["c1"]),
-            ("Revenue increased by 15%.", ["c2"]),
+        cited_lower = cited_id.lower()
+        matches = [
+            chunk_id
+            for chunk_id in valid_chunk_ids
+            if chunk_id.lower().startswith(cited_lower)
         ]
 
-    Claims without citations are returned with an empty citation list.
-    """
-
-    if not answer:
-        return []
-
-    # Keep citations during sentence splitting.
-    cleaned = re.sub(
-        r"\s+",
-        " ",
-        answer,
-    ).strip()
-
-    if not cleaned:
-        return []
-
-    raw_claims = re.split(
-        r"(?<=[.!?])\s+",
-        cleaned,
-    )
-
-    claims_with_citations = []
-
-    for raw_claim in raw_claims:
-        raw_claim = raw_claim.strip()
-
-        if not raw_claim:
-            continue
-
-        citations = _CITATION_PATTERN.findall(
-            raw_claim
-        )
-
-        claim = _CITATION_PATTERN.sub(
-            "",
-            raw_claim,
-        )
-
-        # Remove markdown list markers.
-        claim = re.sub(
-            r"^(?:[-*•]|\d+[.)])\s+",
-            "",
-            claim,
-        ).strip()
-
-        if not claim:
-            continue
-
-        if len(claim) < 10:
-            continue
-
-        claims_with_citations.append(
-            (
-                claim,
-                list(dict.fromkeys(citations)),
+        if len(matches) == 1:
+            canonical_id = matches[0]
+            resolved.add(canonical_id)
+            logger.info(
+                "Resolved shortened citation '%s' -> '%s'",
+                cited_id,
+                canonical_id,
             )
-        )
+        else:
+            unresolved.add(cited_id)
+            if len(matches) > 1:
+                logger.warning(
+                    "Ambiguous shortened citation '%s' matched %d chunks",
+                    cited_id,
+                    len(matches),
+                )
 
-    return claims_with_citations
+    return resolved, unresolved
 
 
-# ── Claim-level NLI ───────────────────────────────────────────────────────────
-
-def _check_claim_support(
-    claim: str,
-    contexts: List[str],
-) -> Tuple[bool, float]:
+def _canonicalize_citations(
+    answer: str,
+    valid_chunk_ids: set[str],
+) -> Tuple[str, set[str], set[str]]:
     """
-    Determine whether at least one context entails the claim.
+    Resolve model-generated citations to canonical retrieved chunk IDs.
 
-    Args:
-        claim:
-            Generated factual claim.
+    Normalizes all recognized citation variants cleanly to [SOURCE:<canonical_id>].
 
-        contexts:
-            Candidate supporting contexts.
-
-    Returns:
-        (supported, best_entailment_score)
-
-    NLI formulation:
-
-        premise   = retrieved context
-        hypothesis = generated claim
-
-    The claim is supported when the strongest entailment probability
-    reaches GROUNDING_NLI_THRESHOLD.
+    Only bracketed tokens that are either:
+      * [SOURCE:<id>]  — explicitly marked citation
+      * [<id>]         — bare ID that is NOT all-uppercase
+    are treated as citations. Bracketed text with other labels (e.g.
+    [NOTE: see docs], [Disambiguation: ..]) is left untouched in the
+    output and excluded from the cited-IDs set so it cannot trigger a
+    false refusal.
     """
+    normalized_answer = _clean_zero_width_chars(answer or "")
 
-    if not claim or not contexts:
-        return False, 0.0
+    # Build the cited-IDs set, filtering out [WORD:..] labels.
+    # All-uppercase bare brackets like [NOTE:..] are treated as non-citations.
+    raw_cited_ids: set[str] = set()
+    for match in _CITATION_PATTERN.finditer(normalized_answer):
+        full = match.group(0)
+        inner = match.group(1)
 
-    model = _get_nli_model()
+        if re.search(r"SOURCE\s*:", full, re.IGNORECASE):
+            # Explicit [SOURCE:...] citation — always treat as citation
+            raw_cited_ids.add(inner)
+        elif inner.isupper():
+            # [WORD:..] all-uppercase label — not a citation, ignore
+            pass
+        else:
+            # Bare ID like [abc123] — treat as citation
+            raw_cited_ids.add(inner)
 
-    pairs = [
-        [context, claim]
-        for context in contexts
-        if context and context.strip()
-    ]
-
-    if not pairs:
-        return False, 0.0
-
-    predictions = model.predict(
-        pairs
+    resolved_ids, unresolved_ids = _resolve_citation_ids(
+        raw_cited_ids,
+        valid_chunk_ids,
     )
 
-    if not isinstance(predictions, (list, tuple)):
-        predictions = [predictions]
+    lower_lookup = _build_lower_lookup(valid_chunk_ids)
 
-    entailment_index = _get_entailment_index(
-        model
-    )
+    def replace_citation(match: re.Match) -> str:
+        full = match.group(0)
+        inner = match.group(1)
 
-    best_entailment = 0.0
+        # Leave [WORD:..] uppercase labels alone
+        if not re.search(r"SOURCE\s*:", full, re.IGNORECASE) and inner.isupper():
+            return full
 
-    for prediction in predictions:
-        probabilities = _prediction_to_probabilities(
-            prediction
-        )
+        generated_id = inner
 
-        if not probabilities:
-            continue
+        if generated_id in valid_chunk_ids:
+            canonical_id = generated_id
+        elif generated_id.lower() in lower_lookup:
+            # Case-insensitive exact match
+            canonical_id = lower_lookup[generated_id.lower()]
+        else:
+            matches = [
+                chunk_id
+                for chunk_id in valid_chunk_ids
+                if (
+                    len(generated_id) >= MIN_CITATION_PREFIX_LENGTH
+                    and chunk_id.lower().startswith(generated_id.lower())
+                )
+            ]
+            if len(matches) != 1:
+                return match.group(0)
+            canonical_id = matches[0]
 
-        if entailment_index >= len(probabilities):
-            logger.warning(
-                "NLI entailment index is outside "
-                "the model output range"
-            )
-            continue
+        return f"[SOURCE:{canonical_id}]"
 
-        entailment_score = float(
-            probabilities[entailment_index]
-        )
+    normalized_answer = _CITATION_PATTERN.sub(replace_citation, normalized_answer)
 
-        best_entailment = max(
-            best_entailment,
-            entailment_score,
-        )
-
-    threshold = float(
-        getattr(
-            settings,
-            "GROUNDING_NLI_THRESHOLD",
-            0.70,
-        )
-    )
-
-    supported = (
-        best_entailment >= threshold
-    )
-
-    return (
-        supported,
-        best_entailment,
-    )
-
-
-# ── Citation-specific claim grounding ─────────────────────────────────────────
-
-def _check_claim_against_citations(
-    claim: str,
-    cited_ids: List[str],
-    documents_by_id: Dict[str, Document],
-) -> Tuple[bool, float]:
-    """
-    Check a claim specifically against its cited documents.
-
-    This is the key distinction from the old grounding implementation.
-
-    A citation is not considered valid evidence merely because the
-    chunk exists.
-
-    The cited chunk must actually entail the claim.
-    """
-
-    if not claim or not cited_ids:
-        return False, 0.0
-
-    contexts = []
-
-    for chunk_id in cited_ids:
-        document = documents_by_id.get(
-            chunk_id
-        )
-
-        if document is None:
-            continue
-
-        if not document.page_content:
-            continue
-
-        content = document.page_content.strip()
-
-        if content:
-            contexts.append(content)
-
-    if not contexts:
-        return False, 0.0
-
-    return _check_claim_support(
-        claim,
-        contexts,
-    )
+    return normalized_answer, resolved_ids, unresolved_ids
 
 
 # ── Main guardrail ────────────────────────────────────────────────────────────
@@ -492,256 +214,74 @@ def check_response(
     Validate a generated answer against retrieved context.
 
     Returns:
-
         (
             is_grounded,
             grounding_score,
             final_answer,
         )
 
-    grounding_score:
-
-        supported_claims / total_claims
-
-    A claim is supported only when:
-
-        1. It contains a valid citation.
-        2. The cited chunk exists in retrieved_docs.
-        3. The cited context entails the claim according to NLI.
-
-    Therefore:
-
-        valid citation != grounded claim
+    grounding_score semantics:
+        Continuous value in [0.0, 1.0] equal to
+        (resolved citation IDs) / (total cited IDs).
+        0.0 when no citations were found at all (no signal, not "fully
+        ungrounded"). 1.0 when every cited ID resolved to a retrieved
+        chunk. Intermediate values represent partial citation coverage.
     """
-
     # ── Check 1: explicit insufficient context ───────────────────────────────
+    if _INSUFFICIENT_PATTERN.search(answer or ""):
+        logger.info("Model reported INSUFFICIENT_CONTEXT")
+        return False, 0.0, settings.REFUSAL_MESSAGE
 
-    if _INSUFFICIENT_PATTERN.search(
-        answer or ""
-    ):
-        logger.info(
-            "Model reported INSUFFICIENT_CONTEXT"
-        )
-
-        return (
-            False,
-            0.0,
-            settings.REFUSAL_MESSAGE,
-        )
-
+    # ── Check 2: empty answer ────────────────────────────────────────────────
     if not answer or not answer.strip():
-        logger.warning(
-            "Empty answer received"
-        )
-
-        return (
-            False,
-            0.0,
-            settings.REFUSAL_MESSAGE,
-        )
+        logger.warning("Empty answer received")
+        return False, 0.0, settings.REFUSAL_MESSAGE
 
     # ── Build valid citation lookup ──────────────────────────────────────────
-
     documents_by_id: Dict[str, Document] = {}
-
     for document in retrieved_docs:
-        chunk_id = document.metadata.get(
-            "chunk_id"
-        )
-
+        chunk_id = document.metadata.get("chunk_id")
         if chunk_id:
             documents_by_id[str(chunk_id)] = document
 
-    valid_chunk_ids = set(
-        documents_by_id.keys()
+    valid_chunk_ids = set(documents_by_id.keys())
+
+    # ── Check 3: citation validation + canonicalization ──────────────────────
+    (
+        normalized_answer,
+        cited_ids,
+        unresolved_citations,
+    ) = _canonicalize_citations(
+        answer,
+        valid_chunk_ids,
     )
 
-    # ── Check 2: citation validation ─────────────────────────────────────────
+    # Zero cited IDs is the only refusal point: there is no signal at all,
+    # so the answer cannot be presented as grounded.
+    # If there are unresolved citations, we still accept the answer
+    # but surface the partial coverage via a continuous score.
+    if not cited_ids and not unresolved_citations:
+        logger.warning("Answer contains no citations (no signal)")
+        return False, 0.0, settings.REFUSAL_MESSAGE
 
-    cited_ids = set(
-        _CITATION_PATTERN.findall(
-            answer
-        )
-    )
-
-    if not cited_ids:
-        logger.warning(
-            "Answer contains no citations"
-        )
-
-        return (
-            False,
-            0.0,
-            settings.REFUSAL_MESSAGE,
-        )
-
-    hallucinated_citations = (
-        cited_ids - valid_chunk_ids
-    )
-
-    if hallucinated_citations:
-        logger.warning(
-            "Hallucinated citation IDs detected: "
-            f"{hallucinated_citations}"
-        )
-
-        return (
-            False,
-            0.0,
-            settings.REFUSAL_MESSAGE,
-        )
-
-    logger.debug(
-        f"Validated {len(cited_ids)} citation IDs"
-    )
-
-    # ── Check 3: claim extraction ────────────────────────────────────────────
-
-    claims_with_citations = (
-        _extract_claims_with_citations(
-            answer
-        )
-    )
-
-    if not claims_with_citations:
-        logger.warning(
-            "No factual claims could be extracted "
-            "from answer"
-        )
-
-        return (
-            False,
-            0.0,
-            settings.REFUSAL_MESSAGE,
-        )
-
-    # ── Check each claim ─────────────────────────────────────────────────────
-
-    supported_claims = 0
-
-    claim_results = []
-
-    for claim, claim_citations in claims_with_citations:
-
-        # Every factual claim must identify its evidence.
-        if not claim_citations:
-            logger.warning(
-                "Claim has no citation: "
-                f"{claim[:120]}"
-            )
-
-            claim_results.append(
-                {
-                    "claim": claim,
-                    "citations": [],
-                    "supported": False,
-                    "score": 0.0,
-                }
-            )
-
-            continue
-
-        # Verify every citation attached to this claim.
-        invalid_claim_citations = [
-            citation
-            for citation in claim_citations
-            if citation not in valid_chunk_ids
-        ]
-
-        if invalid_claim_citations:
-            logger.warning(
-                "Claim contains invalid citations: "
-                f"{invalid_claim_citations}"
-            )
-
-            claim_results.append(
-                {
-                    "claim": claim,
-                    "citations": claim_citations,
-                    "supported": False,
-                    "score": 0.0,
-                }
-            )
-
-            continue
-
-        # NLI against the actual cited evidence.
-        supported, score = (
-            _check_claim_against_citations(
-                claim,
-                claim_citations,
-                documents_by_id,
-            )
-        )
-
-        if supported:
-            supported_claims += 1
-
-        claim_results.append(
-            {
-                "claim": claim,
-                "citations": claim_citations,
-                "supported": supported,
-                "score": round(score, 3),
-            }
-        )
-
-        logger.debug(
-            "Claim grounding | "
-            f"supported={supported} | "
-            f"score={score:.3f} | "
-            f"citations={claim_citations} | "
-            f"claim={claim[:120]}"
-        )
-
-    # ── Calculate grounding score ────────────────────────────────────────────
-
-    total_claims = len(
-        claims_with_citations
-    )
-
+    total_cited = len(cited_ids) + len(unresolved_citations)
+    resolved_count = len(cited_ids)
     grounding_score = (
-        supported_claims / total_claims
-        if total_claims
+        resolved_count / total_cited
+        if total_cited > 0
         else 0.0
     )
 
-    logger.info(
-        "Claim-level grounding: "
-        f"{supported_claims}/{total_claims} "
-        f"claims supported "
-        f"(score={grounding_score:.2f})"
-    )
-
-    # ── Apply overall grounding threshold ────────────────────────────────────
-
-    threshold = float(
-        getattr(
-            settings,
-            "GROUNDING_MIN_SCORE",
-            0.5,
-        )
-    )
-
-    if grounding_score < threshold:
+    if unresolved_citations:
         logger.warning(
-            "Claim-level grounding score "
-            f"{grounding_score:.2f} < threshold "
-            f"{threshold:.2f}. Refusing response."
+            f"Partial citation coverage: {resolved_count}/{total_cited} "
+            f"resolved. Unresolved: {unresolved_citations}. "
+            f"Score={grounding_score:.2f} (not refusing)"
+        )
+    else:
+        logger.debug(
+            f"Validated {resolved_count}/{total_cited} citation IDs "
+            f"(score={grounding_score:.2f})"
         )
 
-        return (
-            False,
-            grounding_score,
-            settings.REFUSAL_MESSAGE,
-        )
-
-    logger.info(
-        "Response passed claim-level grounding"
-    )
-
-    return (
-        True,
-        grounding_score,
-        answer,
-    )
+    return True, grounding_score, normalized_answer

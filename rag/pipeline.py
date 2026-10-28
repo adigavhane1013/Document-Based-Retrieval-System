@@ -23,6 +23,7 @@ RETRY behavior:
 """
 
 import uuid
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -94,6 +95,22 @@ def _get_llm(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# PERFORMANCE METRICS
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class PerfMetrics:
+    retrieval_latency_ms: float = 0.0
+    reranking_latency_ms: float = 0.0
+    llm_latency_ms: float = 0.0
+    total_latency_ms: float = 0.0
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # RESPONSE MODEL
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -107,6 +124,7 @@ class RAGResponse:
     trace_id: str
     refused: bool = False
     decision_metadata: Optional[Dict] = None
+    performance: Optional[PerfMetrics] = None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -119,17 +137,38 @@ def _build_sources(
 ) -> List[Dict]:
     """
     Build the source payload returned to the API.
+
+    For Company KB chunks, additional policy metadata fields are included
+    when present: policy_id, policy_name, version, section, subsection,
+    and heading_path. User-uploaded document chunks will not have these
+    fields and will receive None, preserving existing behaviour.
     """
 
-    return [
-        {
-            "chunk_id": doc.metadata.get("chunk_id"),
-            "source": doc.metadata.get("source"),
-            "page": doc.metadata.get("page"),
+    sources = []
+    for doc in reranked_docs:
+        meta = doc.metadata
+        entry: Dict = {
+            "chunk_id": meta.get("chunk_id"),
+            "source": meta.get("source"),
+            "page": meta.get("page"),
             "chunk_text": doc.page_content,
         }
-        for doc in reranked_docs
-    ]
+        # Include Company KB policy metadata when available.
+        # These keys are only present in company_kb chunks; user-session
+        # chunks will not have them, so the values will be None.
+        for kb_field in (
+            "policy_id",
+            "policy_name",
+            "version",
+            "section",
+            "subsection",
+            "heading_path",
+        ):
+            value = meta.get(kb_field)
+            if value is not None:
+                entry[kb_field] = value
+        sources.append(entry)
+    return sources
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -158,7 +197,8 @@ def _generate_answer(
     question: str,
     docs: List[Document],
     model: Optional[str] = None,
-) -> tuple[str, bool, float, str]:
+    max_context_tokens: Optional[int] = None,
+) -> tuple[str, bool, float, str, float, Optional[int], Optional[int], Optional[int]]:
     """
     Build context, call the LLM, and run the hallucination filter.
 
@@ -172,6 +212,10 @@ def _generate_answer(
         model:
             Optional model override used by FALLBACK.
 
+        max_context_tokens:
+            Optional token budget for the context block.
+            Defaults to settings.LLM_CONTEXT_MAX_TOKENS.
+
     Returns:
         Tuple containing:
 
@@ -179,10 +223,18 @@ def _generate_answer(
             is_grounded
             grounding_score
             context_block
+            llm_latency_ms
+            input_tokens
+            output_tokens
+            total_tokens
     """
 
+    if max_context_tokens is None:
+        max_context_tokens = settings.LLM_CONTEXT_MAX_TOKENS
+
     context_block = build_context_block(
-        docs
+        docs,
+        max_tokens=max_context_tokens,
     )
 
     if (
@@ -227,6 +279,7 @@ def _generate_answer(
             )
         )
 
+    _llm_start = time.perf_counter_ns()
     response = llm.invoke(
         messages,
         config={
@@ -235,8 +288,37 @@ def _generate_answer(
         if callbacks
         else {},
     )
+    _llm_end = time.perf_counter_ns()
 
     raw_answer = response.content
+    _llm_latency_ms = (_llm_end - _llm_start) / 1e6
+
+    _input_tokens = None
+    _output_tokens = None
+    _total_tokens = None
+    try:
+        _token_usage = (
+            getattr(response, "response_metadata", None) or {}
+        ).get("token_usage")
+
+        if not _token_usage:
+            _um = getattr(response, "usage_metadata", None)
+            if _um is not None:
+                _token_usage = {
+                    "prompt_tokens": getattr(_um, "input_tokens", None),
+                    "completion_tokens": getattr(_um, "output_tokens", None),
+                    "total_tokens": getattr(_um, "total_tokens", None),
+                }
+
+        if _token_usage:
+            _pt = _token_usage.get("prompt_tokens")
+            _ct = _token_usage.get("completion_tokens")
+            _tt = _token_usage.get("total_tokens")
+            _input_tokens = int(_pt) if _pt is not None else None
+            _output_tokens = int(_ct) if _ct is not None else None
+            _total_tokens = int(_tt) if _tt is not None else None
+    except Exception:
+        pass
 
     logger.debug(
         f"LLM generated "
@@ -268,6 +350,10 @@ def _generate_answer(
         is_grounded,
         grounding_score,
         context_block,
+        _llm_latency_ms,
+        _input_tokens,
+        _output_tokens,
+        _total_tokens,
     )
 
 
@@ -303,6 +389,44 @@ def run_pipeline(
         or str(uuid.uuid4())
     )
 
+    _pipeline_start = time.perf_counter_ns()
+
+    _total_retrieval_ns = 0
+    _total_reranking_ns = 0
+    _total_llm_ms = 0.0
+    _total_input_tokens: Optional[int] = None
+    _total_output_tokens: Optional[int] = None
+    _total_total_tokens: Optional[int] = None
+
+    def _acc_optional(current: Optional[int], new: Optional[int]) -> Optional[int]:
+        if new is None:
+            return current
+        if current is None:
+            return new
+        return current + new
+
+    def _effective_total(
+        provider_total: Optional[int],
+        input_t: Optional[int],
+        output_t: Optional[int],
+    ) -> Optional[int]:
+        if provider_total is not None:
+            return provider_total
+        if input_t is not None and output_t is not None:
+            return input_t + output_t
+        return None
+
+    def _build_perf() -> PerfMetrics:
+        return PerfMetrics(
+            retrieval_latency_ms=_total_retrieval_ns / 1e6,
+            reranking_latency_ms=_total_reranking_ns / 1e6,
+            llm_latency_ms=_total_llm_ms,
+            total_latency_ms=(time.perf_counter_ns() - _pipeline_start) / 1e6,
+            input_tokens=_total_input_tokens,
+            output_tokens=_total_output_tokens,
+            total_tokens=_total_total_tokens,
+        )
+
     # ──────────────────────────────────────────────────────────────────────────
     # QUERY REWRITING
     # ──────────────────────────────────────────────────────────────────────────
@@ -332,6 +456,7 @@ def run_pipeline(
             _get_initial_retrieval_config()
         )
 
+        _ret_start = time.perf_counter_ns()
         (
             docs,
             scores,
@@ -339,6 +464,7 @@ def run_pipeline(
             rewritten_query,
             initial_retrieval_config,
         )
+        _total_retrieval_ns += time.perf_counter_ns() - _ret_start
 
         if not docs:
 
@@ -356,6 +482,7 @@ def run_pipeline(
                 trace_id=trace_id,
                 refused=True,
                 decision_metadata=None,
+                performance=_build_perf(),
             )
 
         logger.debug(
@@ -366,11 +493,13 @@ def run_pipeline(
         # STEP 2: RERANK
         # ──────────────────────────────────────────────────────────────────────
 
+        _rer_start = time.perf_counter_ns()
         reranked_docs = rerank(
             question,
             docs,
             top_k=settings.TOP_K_RERANK,
         )
+        _total_reranking_ns += time.perf_counter_ns() - _rer_start
 
         logger.debug(
             f"Reranked to "
@@ -386,9 +515,20 @@ def run_pipeline(
             is_grounded,
             grounding_score,
             _context_block,
+            _call_llm_ms,
+            _call_in,
+            _call_out,
+            _call_total,
         ) = _generate_answer(
             question,
             reranked_docs,
+        )
+        _total_llm_ms += _call_llm_ms
+        _total_input_tokens = _acc_optional(_total_input_tokens, _call_in)
+        _total_output_tokens = _acc_optional(_total_output_tokens, _call_out)
+        _total_total_tokens = _acc_optional(
+            _total_total_tokens,
+            _effective_total(_call_total, _call_in, _call_out),
         )
 
         decision_metadata = None
@@ -492,6 +632,7 @@ def run_pipeline(
                             decision_metadata=(
                                 decision_metadata
                             ),
+                            performance=_build_perf(),
                         )
 
                     # ──────────────────────────────────────────────────────────
@@ -521,12 +662,16 @@ def run_pipeline(
                         # RETRIEVE AGAIN
                         # ──────────────────────────────────────────────────────
 
+                        _retry_ret_start = time.perf_counter_ns()
                         (
                             retry_docs,
                             retry_scores,
                         ) = session.retriever.retrieve(
                             rewritten_query,
                             retry_config,
+                        )
+                        _total_retrieval_ns += (
+                            time.perf_counter_ns() - _retry_ret_start
                         )
 
                         if not retry_docs:
@@ -548,6 +693,7 @@ def run_pipeline(
                                 decision_metadata=(
                                     decision_metadata
                                 ),
+                                performance=_build_perf(),
                             )
 
                         logger.info(
@@ -559,6 +705,7 @@ def run_pipeline(
                         # RERANK AGAIN
                         # ──────────────────────────────────────────────────────
 
+                        _retry_rer_start = time.perf_counter_ns()
                         reranked_docs = rerank(
                             question,
                             retry_docs,
@@ -566,6 +713,9 @@ def run_pipeline(
                                 settings.TOP_K_RERANK,
                                 len(retry_docs),
                             ),
+                        )
+                        _total_reranking_ns += (
+                            time.perf_counter_ns() - _retry_rer_start
                         )
 
                         logger.info(
@@ -582,9 +732,24 @@ def run_pipeline(
                             is_grounded,
                             grounding_score,
                             _context_block,
+                            _call_llm_ms,
+                            _call_in,
+                            _call_out,
+                            _call_total,
                         ) = _generate_answer(
                             question,
                             reranked_docs,
+                        )
+                        _total_llm_ms += _call_llm_ms
+                        _total_input_tokens = _acc_optional(
+                            _total_input_tokens, _call_in
+                        )
+                        _total_output_tokens = _acc_optional(
+                            _total_output_tokens, _call_out
+                        )
+                        _total_total_tokens = _acc_optional(
+                            _total_total_tokens,
+                            _effective_total(_call_total, _call_in, _call_out),
                         )
 
                         logger.info(
@@ -637,6 +802,7 @@ def run_pipeline(
                                 decision_metadata=(
                                     decision_metadata
                                 ),
+                                performance=_build_perf(),
                             )
 
                         retry_test_case = {
@@ -681,6 +847,7 @@ def run_pipeline(
                                 decision_metadata=(
                                     decision_metadata
                                 ),
+                                performance=_build_perf(),
                             )
 
                         # ──────────────────────────────────────────────────────
@@ -737,6 +904,7 @@ def run_pipeline(
                                 decision_metadata=(
                                     decision_metadata
                                 ),
+                                performance=_build_perf(),
                             )
 
                         # ──────────────────────────────────────────────────────
@@ -801,6 +969,7 @@ def run_pipeline(
                                 decision_metadata=(
                                     decision_metadata
                                 ),
+                                performance=_build_perf(),
                             )
 
                         logger.info(
@@ -816,10 +985,25 @@ def run_pipeline(
                             is_grounded,
                             grounding_score,
                             _context_block,
+                            _call_llm_ms,
+                            _call_in,
+                            _call_out,
+                            _call_total,
                         ) = _generate_answer(
                             question,
                             reranked_docs,
                             model=fallback_model,
+                        )
+                        _total_llm_ms += _call_llm_ms
+                        _total_input_tokens = _acc_optional(
+                            _total_input_tokens, _call_in
+                        )
+                        _total_output_tokens = _acc_optional(
+                            _total_output_tokens, _call_out
+                        )
+                        _total_total_tokens = _acc_optional(
+                            _total_total_tokens,
+                            _effective_total(_call_total, _call_in, _call_out),
                         )
 
                         decision_metadata = dict(
@@ -886,6 +1070,7 @@ def run_pipeline(
             trace_id=trace_id,
             refused=not is_grounded,
             decision_metadata=decision_metadata,
+            performance=_build_perf(),
         )
 
     except Exception as exc:

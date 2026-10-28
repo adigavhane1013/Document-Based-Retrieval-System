@@ -38,9 +38,12 @@ from vectorstore.vectordb import (
     delete_vectorstore,
     get_all_documents,
     load_vectorstore,
+    load_company_kb_vectorstore,
+    get_all_company_kb_documents,
+    company_kb_exists,
 )
 from retrieval.retriever import HybridRetriever
-from rag.pipeline import RAGSession, RAGResponse, run_pipeline
+from rag.pipeline import PerfMetrics, RAGSession, RAGResponse, run_pipeline
 from evaluation.ragas_eval import run_ragas_evaluation
 from observability.logger import get_logger
 from auth import (
@@ -118,12 +121,22 @@ def _load_sessions() -> Dict[str, Any]:
 def _save_sessions(
     sessions: Dict[str, Any]
 ) -> None:
-    """Save all chat sessions to disk."""
+    """Save all chat sessions to disk.
+
+    The company_kb entry is intentionally excluded — it is a shared,
+    ephemeral session reconstructed from Qdrant on every startup.
+    """
 
     try:
+        # Exclude the company_kb sentinel from disk persistence.
+        sessions_to_save = {
+            sid: data
+            for sid, data in sessions.items()
+            if sid != "company_kb"
+        }
         SESSIONS_FILE.write_text(
             json.dumps(
-                sessions,
+                sessions_to_save,
                 indent=2,
                 ensure_ascii=False,
             ),
@@ -245,6 +258,93 @@ for sid in chat_sessions:
     _rebuild_session(sid)
 
 
+# ── Company Knowledge Base session ─────────────────────────────────────────────
+#
+# The company_kb is a pre-ingested shared knowledge base, not a per-user
+# upload session. It is loaded once at startup and made available to all
+# authenticated users under the reserved session_id "company_kb".
+#
+# The sentinel entry in chat_sessions is intentionally set with
+# user_id=None so that the per-user ownership check in /ask is bypassed
+# via an explicit guard (session_id == COMPANY_KB_SESSION_ID).
+
+COMPANY_KB_SESSION_ID = "company_kb"
+
+
+def _load_company_kb_session() -> None:
+    """
+    Load the Company KB into a shared RAGSession backed by the
+    dedicated company_kb Qdrant collection.
+
+    Safe to call if the collection does not yet exist — logs a warning
+    and skips silently rather than crashing startup.
+    """
+    try:
+        if not company_kb_exists():
+            logger.warning(
+                "Company KB Qdrant collection not found — "
+                "company_kb session will not be available. "
+                "Run: python -m ingestion.company_kb"
+            )
+            return
+
+        kb_vectorstore = load_company_kb_vectorstore()
+        if kb_vectorstore is None:
+            logger.warning(
+                "load_company_kb_vectorstore() returned None — "
+                "company_kb session will not be available."
+            )
+            return
+
+        kb_chunks = get_all_company_kb_documents()
+        if not kb_chunks:
+            logger.warning(
+                "No documents found in company_kb collection — "
+                "company_kb session will not be available."
+            )
+            return
+
+        kb_retriever = HybridRetriever(
+            vectorstore=kb_vectorstore,
+            all_chunks=kb_chunks,
+        )
+
+        rag_sessions[COMPANY_KB_SESSION_ID] = RAGSession(
+            session_id=COMPANY_KB_SESSION_ID,
+            retriever=kb_retriever,
+            all_chunks=kb_chunks,
+        )
+
+        # Register a sentinel entry so that the standard session-existence
+        # checks in /ask pass without requiring a real user_id match.
+        if COMPANY_KB_SESSION_ID not in chat_sessions:
+            chat_sessions[COMPANY_KB_SESSION_ID] = {
+                "session_id": COMPANY_KB_SESSION_ID,
+                "user_id": None,  # shared — no owner
+                "created_at": "startup",
+                "last_updated": "startup",
+                "filename": "Company Knowledge Base",
+                "document_count": 6,
+                "chunk_count": len(kb_chunks),
+                "messages": [],
+                "is_company_kb": True,
+            }
+
+        logger.info(
+            f"Company KB session loaded: {len(kb_chunks)} chunks "
+            f"from {COMPANY_KB_SESSION_ID}"
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Failed to load Company KB session: {e} — "
+            "company_kb session will not be available."
+        )
+
+
+_load_company_kb_session()
+
+
 # ── Request/Response Models ────────────────────────────────────────────────────
 
 
@@ -263,6 +363,14 @@ class SourceInfo(BaseModel):
     source: Optional[str] = None
     page: Optional[int] = None
     chunk_text: Optional[str] = None
+
+    # Company KB policy metadata — populated only for company_kb chunks.
+    policy_id: Optional[str] = None
+    policy_name: Optional[str] = None
+    version: Optional[str] = None
+    section: Optional[str] = None
+    subsection: Optional[str] = None
+    heading_path: Optional[str] = None
 
 
 class DecisionInfo(BaseModel):
@@ -289,6 +397,7 @@ class ChatResponse(BaseModel):
     trace_id: str
     timestamp: str
     decision_metadata: Optional[DecisionInfo] = None
+    performance: Optional[PerfMetrics] = None
 
 
 class EvaluateRequest(BaseModel):
@@ -653,7 +762,13 @@ def ask_question(
             "Session not found",
         )
 
-    if (
+    # The company_kb session is shared — any authenticated user may query it.
+    # All other sessions are user-owned and require an ownership check.
+    is_company_kb_session = (
+        request.session_id == COMPANY_KB_SESSION_ID
+    )
+
+    if not is_company_kb_session and (
         chat_sessions[
             request.session_id
         ].get("user_id")
@@ -971,6 +1086,7 @@ def ask_question(
             trace_id=result.trace_id,
             timestamp=timestamp,
             decision_metadata=decision_info,
+            performance=result.performance,
         )
 
     except HTTPException:
@@ -1052,7 +1168,38 @@ def evaluate_answer(
             "This session belongs to another user",
         )
 
-    # ── Check cache ──────────────────────────────────────────────────────────
+    # ── Locate original message BEFORE checking the cache ────────────────────
+    #
+    # A trace_id alone is not an authorization mechanism. The trace must first
+    # be proven to belong to the authenticated user's requested session.
+    # Otherwise, a user who knows another user's trace_id could receive that
+    # user's cached evaluation scores.
+
+    messages = chat_sessions[
+        request.session_id
+    ].get(
+        "messages",
+        [],
+    )
+
+    message = next(
+        (
+            item
+            for item in messages
+            if item.get("trace_id")
+            == request.trace_id
+        ),
+        None,
+    )
+
+    if message is None:
+
+        raise HTTPException(
+            404,
+            "No stored answer found for this trace_id",
+        )
+
+    # ── Check cache only after trace ownership is established ────────────────
 
     eval_history = _load_eval_history()
 
@@ -1080,32 +1227,6 @@ def evaluate_answer(
                 "hallucination_rate"
             ],
             cached=True,
-        )
-
-    # ── Locate original message ──────────────────────────────────────────────
-
-    messages = chat_sessions[
-        request.session_id
-    ].get(
-        "messages",
-        [],
-    )
-
-    message = next(
-        (
-            item
-            for item in messages
-            if item.get("trace_id")
-            == request.trace_id
-        ),
-        None,
-    )
-
-    if message is None:
-
-        raise HTTPException(
-            404,
-            "No stored answer found for this trace_id",
         )
 
     if message.get("refused"):
@@ -1213,37 +1334,40 @@ def list_sessions(
 ) -> Dict[str, Any]:
     """List sessions belonging to the current user."""
 
-    return {
-        "sessions": [
+    user_sessions = [
+        {
+            "session_id": sid,
+            "created_at": sess.get("created_at"),
+            "last_updated": sess.get("last_updated"),
+            "filename": sess.get("filename"),
+            "message_count": len(sess.get("messages", [])),
+            "document_count": sess.get("document_count"),
+            "chunk_count": sess.get("chunk_count"),
+            "is_company_kb": sess.get("is_company_kb", False),
+        }
+        for sid, sess in chat_sessions.items()
+        if sess.get("user_id") == current_user.user_id
+    ]
+
+    # Include the shared Company KB session for all authenticated users.
+    kb_sess = chat_sessions.get(COMPANY_KB_SESSION_ID)
+    if kb_sess is not None and COMPANY_KB_SESSION_ID in rag_sessions:
+        user_sessions.append(
             {
-                "session_id": sid,
-                "created_at": sess.get(
-                    "created_at"
-                ),
-                "last_updated": sess.get(
-                    "last_updated"
-                ),
-                "filename": sess.get(
-                    "filename"
-                ),
+                "session_id": COMPANY_KB_SESSION_ID,
+                "created_at": kb_sess.get("created_at"),
+                "last_updated": kb_sess.get("last_updated"),
+                "filename": kb_sess.get("filename"),
                 "message_count": len(
-                    sess.get(
-                        "messages",
-                        [],
-                    )
+                    kb_sess.get("messages", [])
                 ),
-                "document_count": sess.get(
-                    "document_count"
-                ),
-                "chunk_count": sess.get(
-                    "chunk_count"
-                ),
+                "document_count": kb_sess.get("document_count"),
+                "chunk_count": kb_sess.get("chunk_count"),
+                "is_company_kb": True,
             }
-            for sid, sess in chat_sessions.items()
-            if sess.get("user_id")
-            == current_user.user_id
-        ]
-    }
+        )
+
+    return {"sessions": user_sessions}
 
 
 @app.get(
@@ -1384,7 +1508,7 @@ if __name__ == "__main__":
     )
 
     uvicorn.run(
-        "main:app",
+        app,
         host="0.0.0.0",
         port=port,
         reload=False,

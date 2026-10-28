@@ -80,3 +80,27 @@ import_golden_documents.py
 merge_golden_results.py
 rerun_question_7.py
 run_golden_dataset.py
+
+
+# Local AI assistant configuration
+.claude/
+CLAUDE.md
+PROJECT_CONTEXT.md
+
+# Local evaluation outputs and debugging artifacts
+evaluation/benchmark_results.json
+evaluation/benchmark_results_diagnostic.json
+evaluation/chunk_map_snippets.txt
+evaluation/company_kb_chunks_final.json
+evaluation/qa_list.txt
+
+# Generated analysis output
+graphify-out/
+
+# Local API key testing
+test_groq_api_key.py
+
+# Local experimental tests
+tests/test_fallback_execution.py
+tests/test_hallucination_filter.py
+tests/test_retry_execution.py

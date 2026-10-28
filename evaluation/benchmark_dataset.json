@@ -1,0 +1,224 @@
+{
+  "questions": [
+    {
+      "question": "What is the effective date of the HR Policy Manual?",
+      "reference_answer": "1 April 2026",
+      "relevant_chunk_ids": [
+        "e10a2e07020c"
+      ],
+      "source_document": "01_HR_Policy_Manual.md",
+      "difficulty": "easy",
+      "evaluation_type": "direct"
+    },
+    {
+      "question": "During the first three months of probation, may employees work remotely?",
+      "reference_answer": "No, employees in the first three months of probation work from the office unless the Department Head approves an exception in writing.",
+      "relevant_chunk_ids": [
+        "26d4506303ae"
+      ],
+      "source_document": "01_HR_Policy_Manual.md",
+      "difficulty": "easy",
+      "evaluation_type": "conditional"
+    },
+    {
+      "question": "What is the maximum number of ad hoc remote days per month without Department Head approval?",
+      "reference_answer": "5",
+      "relevant_chunk_ids": [
+        "f60994cf5619"
+      ],
+      "source_document": "02_Remote_Work_Policy.md",
+      "difficulty": "easy",
+      "evaluation_type": "direct"
+    },
+    {
+      "question": "Can an employee on a Performance Improvement Plan work remotely?",
+      "reference_answer": "Employees on a Performance Improvement Plan may be required to work from the office for the duration of the plan, at the discretion of the Department Head and the HRBP.",
+      "relevant_chunk_ids": [
+        "28f6c3d828cd"
+      ],
+      "source_document": "02_Remote_Work_Policy.md",
+      "difficulty": "medium",
+      "evaluation_type": "conditional"
+    },
+    {
+      "question": "Which employees are ineligible for remote work due to open information security violations?",
+      "reference_answer": "Employees who have an open information security violation under NXR-IT-001 are not eligible for remote work until the matter has been closed.",
+      "relevant_chunk_ids": [
+        "28f6c3d828cd"
+      ],
+      "source_document": "02_Remote_Work_Policy.md",
+      "difficulty": "medium",
+      "evaluation_type": "negative"
+    },
+    {
+      "question": "What daily meal cap applies to an L5 grade employee on Tier 1 cities while on overnight business travel?",
+      "reference_answer": "₹2,500 per day",
+      "relevant_chunk_ids": [
+        "6802decf08f7"
+      ],
+      "source_document": "03_Travel_and_Expense_Policy.md",
+      "difficulty": "easy",
+      "evaluation_type": "direct"
+    },
+    {
+      "question": "Above what expense amount is dual approval required from both Department Head and Finance approver?",
+      "reference_answer": "Above ₹25,000",
+      "relevant_chunk_ids": [
+        "ea8b4a3db987"
+      ],
+      "source_document": "03_Travel_and_Expense_Policy.md",
+      "difficulty": "easy",
+      "evaluation_type": "direct"
+    },
+    {
+      "question": "When must an employee report a lost or stolen device within one hour, and to whom?",
+      "reference_answer": "A lost or stolen device must be reported to security@nexoratech.example and through NexoraDesk within one hour of discovery.",
+      "relevant_chunk_ids": [
+        "2c981ac4cebe"
+      ],
+      "source_document": "04_IT_Security_Policy.md",
+      "difficulty": "easy",
+      "evaluation_type": "direct"
+    },
+    {
+      "question": "What is the maximum grant duration for R3 production access level?",
+      "reference_answer": "4 hours per grant",
+      "relevant_chunk_ids": [
+        "a7c010128222"
+      ],
+      "source_document": "04_IT_Security_Policy.md",
+      "difficulty": "medium",
+      "evaluation_type": "direct"
+    },
+    {
+      "question": "Can an employee on probation hold R4 production access?",
+      "reference_answer": "No, an employee on probation may hold R1 access only; R4 access is prohibited.",
+      "relevant_chunk_ids": [
+        "88049df8f865"
+      ],
+      "source_document": "04_IT_Security_Policy.md",
+      "difficulty": "medium",
+      "evaluation_type": "conditional"
+    },
+    {
+      "question": "Under what condition may an employee work from abroad for personal reasons?",
+      "reference_answer": "Employees must not work from outside India without prior written approval; personal work from abroad is governed by Section 8 of the Remote Work Policy.",
+      "relevant_chunk_ids": [
+        "6aaf17f037ca"
+      ],
+      "source_document": "02_Remote_Work_Policy.md",
+      "difficulty": "hard",
+      "evaluation_type": "interpretation"
+    },
+    {
+      "question": "Under what condition may a gift above ₹5,000 be accepted?",
+      "reference_answer": "A gift above ₹5,000 must be declined or returned; if refusal would cause serious offence, it must be handed to Legal & Compliance which will decide how it is used.",
+      "relevant_chunk_ids": [
+        "8ce54785757a"
+      ],
+      "source_document": "06_Code_of_Conduct_and_Ethics.md",
+      "difficulty": "medium",
+      "evaluation_type": "precision"
+    },
+    {
+      "question": "May an employee working remotely use a personal laptop to access source code?",
+      "reference_answer": "No, personal laptops must not be used to access source code, customer data, or Restricted information.",
+      "relevant_chunk_ids": [
+        "27b423ba196d"
+      ],
+      "source_document": "02_Remote_Work_Policy.md",
+      "difficulty": "medium",
+      "evaluation_type": "negative"
+    },
+    {
+      "question": "What is the maximum number of consecutive days of casual leave an employee may take?",
+      "reference_answer": "3",
+      "relevant_chunk_ids": [
+        "94ae19ba764a"
+      ],
+      "source_document": "01_HR_Policy_Manual.md",
+      "difficulty": "easy",
+      "evaluation_type": "direct"
+    },
+    {
+      "question": "When must an employee on probation complete Information Security Awareness training?",
+      "reference_answer": "Within 10 working days of joining.",
+      "relevant_chunk_ids": [
+        "43e6b6d54063"
+      ],
+      "source_document": "04_IT_Security_Policy.md",
+      "difficulty": "medium",
+      "evaluation_type": "conditional"
+    },
+    {
+      "question": "Which policy governs the reimbursement of travel expenses for business trips?",
+      "reference_answer": "The Travel and Expense Reimbursement Policy (NXR-FIN-001) governs business travel and expense reimbursement.",
+      "relevant_chunk_ids": [
+        "a4c0885dcbf9"
+      ],
+      "source_document": "03_Travel_and_Expense_Policy.md",
+      "difficulty": "easy",
+      "evaluation_type": "direct"
+    },
+    {
+      "question": "Can an employee on probation be placed on the primary on-call rotation?",
+      "reference_answer": "No, employees on probation are not eligible for the primary on-call rotation.",
+      "relevant_chunk_ids": [
+        "d70dd0095cf8"
+      ],
+      "source_document": "05_Engineering_Guidelines.md",
+      "difficulty": "medium",
+      "evaluation_type": "negative"
+    },
+    {
+      "question": "What is the minimum password length required by the IT Security Policy?",
+      "reference_answer": "14 characters",
+      "relevant_chunk_ids": [
+        "0f2bd6b85092"
+      ],
+      "source_document": "04_IT_Security_Policy.md",
+      "difficulty": "easy",
+      "evaluation_type": "direct"
+    },
+    {
+      "question": "Which employees are ineligible for remote work due to an open disciplinary process?",
+      "reference_answer": "Employees who have an open disciplinary process under Section 11 of NXR-HR-001 are not eligible for remote work until the matter has been closed.",
+      "relevant_chunk_ids": [
+        "28f6c3d828cd"
+      ],
+      "source_document": "02_Remote_Work_Policy.md",
+      "difficulty": "medium",
+      "evaluation_type": "negative"
+    },
+    {
+      "question": "What daily meal allowance may be claimed for same-day travel of more than 8 hours?",
+      "reference_answer": "A lunch allowance of up to ₹700 may be claimed with a receipt.",
+      "relevant_chunk_ids": [
+        "6802decf08f7"
+      ],
+      "source_document": "03_Travel_and_Expense_Policy.md",
+      "difficulty": "medium",
+      "evaluation_type": "precision"
+    },
+    {
+      "question": "Can a contractor work remotely from a location outside India?",
+      "reference_answer": "The policy does not explicitly state whether contractors may work from outside India. Contractors may work remotely only where permitted by their engagement terms, and the applicable work-from-abroad requirements must be followed.",
+      "relevant_chunk_ids": [
+        
+      ],
+      "source_document": "01_HR_Policy_Manual.md",
+      "difficulty": "medium",
+      "evaluation_type": "negative"
+    },
+    {
+      "question": "What is the maximum number of consecutive days of privileged leave that may be carried forward to the next year?",
+      "reference_answer": "12",
+      "relevant_chunk_ids": [
+        "94ae19ba764a"
+      ],
+      "source_document": "01_HR_Policy_Manual.md",
+      "difficulty": "easy",
+      "evaluation_type": "direct"
+    }
+  ]
+}

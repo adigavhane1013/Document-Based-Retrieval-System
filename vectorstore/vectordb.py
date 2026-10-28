@@ -34,11 +34,12 @@ from observability.logger import get_logger
 logger = get_logger("vectorstore.db")
 
 
-def _client() -> QdrantClient:
+def _client(timeout: Optional[int] = None) -> QdrantClient:
     """Create and return a Qdrant client."""
     return QdrantClient(
         url=settings.QDRANT_URL,
         api_key=settings.QDRANT_API_KEY,
+        timeout=timeout or getattr(settings, "QDRANT_TIMEOUT", 60),
     )
 
 
@@ -227,3 +228,184 @@ def delete_vectorstore(session_id: str) -> None:
         logger.info(
             f"Deleted Qdrant collection for session {session_id}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dedicated Company Knowledge Base collection
+# ─────────────────────────────────────────────────────────────────────────────
+
+COMPANY_KB_COLLECTION: str = getattr(settings, "COMPANY_KB_COLLECTION", "company_kb")
+
+
+def company_kb_exists() -> bool:
+    """Check whether the dedicated company_kb collection exists in Qdrant."""
+    client = _client()
+    return client.collection_exists(COMPANY_KB_COLLECTION)
+
+
+def create_company_kb_vectorstore(
+    chunks: List[Document],
+    force_recreate: bool = False,
+    ids: Optional[List[str]] = None,
+) -> QdrantVectorStore:
+    """
+    Create or populate the dedicated company_kb Qdrant collection.
+
+    Chunks are uploaded in batches of settings.EMBEDDING_BATCH_SIZE to avoid
+    Qdrant write timeouts when indexing the full Company KB corpus.
+
+    Args:
+        chunks: List of LangChain Document chunks with policy/section metadata.
+        force_recreate: If True, drops any existing collection and recreates it.
+        ids: Optional deterministic point IDs (UUID strings) to avoid duplicates.
+
+    Returns:
+        QdrantVectorStore connected to the company_kb collection.
+    """
+    client = _client()
+    embeddings = get_embedding_model()
+
+    batch_size = max(1, settings.EMBEDDING_BATCH_SIZE)
+    total_batches = (len(chunks) + batch_size - 1) // batch_size
+
+    logger.info(
+        f"Indexing {len(chunks)} chunks into dedicated Qdrant collection "
+        f"'{COMPANY_KB_COLLECTION}' (force_recreate={force_recreate}) "
+        f"in {total_batches} batch(es) of {batch_size}"
+    )
+
+    if force_recreate or not client.collection_exists(COMPANY_KB_COLLECTION):
+        # Create the collection with the first batch, then upsert the rest.
+        first_batch = chunks[:batch_size]
+        first_ids = ids[:batch_size] if ids else None
+
+        kwargs = {
+            "documents": first_batch,
+            "embedding": embeddings,
+            "url": settings.QDRANT_URL,
+            "api_key": settings.QDRANT_API_KEY,
+            "collection_name": COMPANY_KB_COLLECTION,
+            "force_recreate": True,
+            "distance": qmodels.Distance.COSINE,
+        }
+        if first_ids:
+            kwargs["ids"] = first_ids
+        store = QdrantVectorStore.from_documents(**kwargs)
+        logger.info(
+            f"Qdrant collection '{COMPANY_KB_COLLECTION}' created with "
+            f"{len(first_batch)} chunks (batch 1/{total_batches})"
+        )
+
+        for i in range(batch_size, len(chunks), batch_size):
+            batch_chunks = chunks[i:i + batch_size]
+            batch_ids = ids[i:i + batch_size] if ids else None
+            batch_num = i // batch_size + 1
+            store.add_documents(batch_chunks, ids=batch_ids)
+            logger.info(
+                f"Upserted batch {batch_num}/{total_batches} "
+                f"({len(batch_chunks)} chunks) into '{COMPANY_KB_COLLECTION}'"
+            )
+
+        return store
+
+    # Collection already exists and force_recreate is False: load and upsert in batches
+    store = QdrantVectorStore(
+        client=client,
+        collection_name=COMPANY_KB_COLLECTION,
+        embedding=embeddings,
+    )
+    for i in range(0, len(chunks), batch_size):
+        batch_chunks = chunks[i:i + batch_size]
+        batch_ids = ids[i:i + batch_size] if ids else None
+        batch_num = i // batch_size + 1
+        store.add_documents(batch_chunks, ids=batch_ids)
+        logger.info(
+            f"Upserted batch {batch_num}/{total_batches} "
+            f"({len(batch_chunks)} chunks) into '{COMPANY_KB_COLLECTION}'"
+        )
+
+    logger.info(
+        f"Upserted {len(chunks)} chunks into existing '{COMPANY_KB_COLLECTION}'"
+    )
+    return store
+
+
+def load_company_kb_vectorstore() -> Optional[QdrantVectorStore]:
+    """
+    Load the existing company_kb Qdrant collection.
+
+    Returns:
+        QdrantVectorStore if the company_kb collection exists, otherwise None.
+    """
+    client = _client()
+    if not client.collection_exists(COMPANY_KB_COLLECTION):
+        logger.warning(
+            f"No Qdrant collection found for '{COMPANY_KB_COLLECTION}'"
+        )
+        return None
+
+    embeddings = get_embedding_model()
+    return QdrantVectorStore(
+        client=client,
+        collection_name=COMPANY_KB_COLLECTION,
+        embedding=embeddings,
+    )
+
+
+def get_all_company_kb_documents() -> List[Document]:
+    """
+    Retrieve all stored LangChain Documents from the company_kb collection.
+    Used for reconstructing the in-memory BM25 index.
+    """
+    client = _client()
+    if not client.collection_exists(COMPANY_KB_COLLECTION):
+        raise RuntimeError(
+            f"No Qdrant collection found for '{COMPANY_KB_COLLECTION}'"
+        )
+
+    documents: List[Document] = []
+    next_page_offset = None
+
+    logger.info(
+        f"Loading all stored documents for '{COMPANY_KB_COLLECTION}'"
+    )
+
+    while True:
+        points, next_page_offset = client.scroll(
+            collection_name=COMPANY_KB_COLLECTION,
+            limit=100,
+            offset=next_page_offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        for point in points:
+            payload = point.payload or {}
+            page_content = payload.get("page_content")
+            metadata = payload.get("metadata", {})
+
+            if page_content is None:
+                logger.warning(
+                    f"Skipping Qdrant point {point.id} in "
+                    f"{COMPANY_KB_COLLECTION}: missing page_content"
+                )
+                continue
+
+            if not isinstance(metadata, dict):
+                metadata = {}
+
+            documents.append(
+                Document(
+                    page_content=page_content,
+                    metadata=metadata,
+                )
+            )
+
+        if next_page_offset is None:
+            break
+
+    logger.info(
+        f"Loaded {len(documents)} stored documents "
+        f"from '{COMPANY_KB_COLLECTION}'"
+    )
+    return documents

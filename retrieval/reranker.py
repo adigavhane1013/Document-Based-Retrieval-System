@@ -12,12 +12,13 @@ Why reranking is essential:
     production pattern (retrieve-then-rerank).
 
 This module uses a local HuggingFace cross-encoder (ms-marco-MiniLM-L-6-v2)
-which runs on CPU in ~50ms for 20 candidates. No extra API cost.
+which runs locally without an additional API cost.
 
 To switch to a hosted reranker (Cohere, Jina), replace _rerank_local() with
 an API call and update configs/settings.py.
 """
 
+import time
 from typing import List, Tuple
 
 from langchain_core.documents import Document
@@ -32,11 +33,33 @@ _cross_encoder = None
 
 
 def _load_model():
+    """
+    Load the cross-encoder lazily.
+
+    The model is cached in the module-level _cross_encoder variable so that
+    it should only be loaded once per running Python process.
+    """
     global _cross_encoder
+
     if _cross_encoder is None:
         from sentence_transformers import CrossEncoder
-        logger.info(f"Loading reranker model: {settings.RERANKER_MODEL}")
+
+        logger.info(
+            f"Loading reranker model: {settings.RERANKER_MODEL}"
+        )
+
+        load_start_ns = time.perf_counter_ns()
+
         _cross_encoder = CrossEncoder(settings.RERANKER_MODEL)
+
+        load_latency_ms = (
+            time.perf_counter_ns() - load_start_ns
+        ) / 1_000_000
+
+        logger.info(
+            f"Reranker model loaded in {load_latency_ms:.1f} ms"
+        )
+
     return _cross_encoder
 
 
@@ -56,30 +79,83 @@ def rerank(
         return docs[:top_k]
 
     if len(docs) <= top_k:
-        logger.info(f"Only {len(docs)} docs, skipping rerank (top_k={top_k})")
+        logger.info(
+            f"Only {len(docs)} docs, skipping rerank (top_k={top_k})"
+        )
         return docs
 
+    rerank_start_ns = time.perf_counter_ns()
+
     try:
-        model  = _load_model()
-        pairs  = [(query, doc.page_content) for doc in docs]
+        # -------------------------------------------------------------
+        # Model loading
+        # -------------------------------------------------------------
+        model = _load_model()
+
+        # -------------------------------------------------------------
+        # Prepare query-document pairs
+        # -------------------------------------------------------------
+        pairs = [
+            (query, doc.page_content)
+            for doc in docs
+        ]
+
+        # -------------------------------------------------------------
+        # Cross-encoder inference
+        # -------------------------------------------------------------
+        prediction_start_ns = time.perf_counter_ns()
+
         scores = model.predict(pairs)
 
+        prediction_latency_ms = (
+            time.perf_counter_ns() - prediction_start_ns
+        ) / 1_000_000
+
+        # -------------------------------------------------------------
+        # Sort documents by cross-encoder relevance score
+        # -------------------------------------------------------------
         ranked: List[Tuple[Document, float]] = sorted(
             zip(docs, scores),
             key=lambda x: x[1],
             reverse=True,
         )
 
-        top_docs = [doc for doc, _ in ranked[:top_k]]
-        top_scores = [s for _, s in ranked[:top_k]]
+        top_docs = [
+            doc
+            for doc, _ in ranked[:top_k]
+        ]
+
+        top_scores = [
+            score
+            for _, score in ranked[:top_k]
+        ]
+
+        total_rerank_latency_ms = (
+            time.perf_counter_ns() - rerank_start_ns
+        ) / 1_000_000
 
         logger.info(
             f"Reranked {len(docs)} → {len(top_docs)} docs. "
-            f"Top score: {round(top_scores[0], 3)}"
+            f"Top score: {round(float(top_scores[0]), 3)}"
         )
+
+        logger.info(
+            f"Reranker timing | "
+            f"prediction={prediction_latency_ms:.1f} ms | "
+            f"total={total_rerank_latency_ms:.1f} ms"
+        )
+
         return top_docs
 
     except Exception as exc:
-        # Reranker failure is non-fatal; fall back to original order
-        logger.warning(f"Reranker failed ({exc}), falling back to original order")
+        total_rerank_latency_ms = (
+            time.perf_counter_ns() - rerank_start_ns
+        ) / 1_000_000
+
+        logger.warning(
+            f"Reranker failed ({exc}), "
+            f"falling back to original order. "
+            f"Elapsed={total_rerank_latency_ms:.1f} ms"
+        )
+
         return docs[:top_k]

@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DocMind — Performance Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:ital,wght@0,300;0,400;1,300&family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;1,9..144,300&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0c0c0f; --surface: #13131a; --surface2: #1a1a25; --border: #2a2a3d;
+    --accent: #7c6af7; --accent2: #f7c26a; --accent3: #38bdf8; --text: #e8e8f0; --muted: #6b6b8a;
+    --success: #6af7a8; --danger: #f76a6a; --radius: 14px;
+  }
+  html, body { min-height: 100%; background: var(--bg); color: var(--text); font-family: 'Syne', sans-serif; }
+  body::before { content:''; position:fixed; inset:0; z-index:0; background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E"); pointer-events:none; }
+  body::after { content:''; position:fixed; top:-20%; right:-10%; width:60vw; height:60vw; background:radial-gradient(circle,rgba(124,106,247,0.07) 0%,transparent 70%); pointer-events:none; z-index:0; }
+
+  /* App Container */
+  .container { max-width: 1100px; margin: 0 auto; padding: 32px 24px 60px; position: relative; z-index: 1; display: flex; flex-direction: column; gap: 28px; }
+
+  /* Header */
+  .nav-header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
+  .logo-block { display: flex; align-items: baseline; gap: 14px; }
+  .logo-mark { font-family: 'Fraunces', serif; font-size: 24px; font-weight: 300; letter-spacing: -0.5px; }
+  .logo-mark span { color: var(--accent); font-style: italic; }
+  .badge-tag { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--accent2); background: rgba(247,194,106,0.1); border: 1px solid rgba(247,194,106,0.3); padding: 3px 9px; border-radius: 20px; letter-spacing: 1.5px; text-transform: uppercase; }
+  .nav-actions { display: flex; align-items: center; gap: 14px; }
+  .back-btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font-family: 'DM Mono', monospace; font-size: 11px; text-decoration: none; transition: all 0.2s; }
+  .back-btn:hover { border-color: var(--accent); color: var(--accent); transform: translateX(-2px); }
+  .user-pill { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--muted); }
+  .logout-btn { background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; padding: 4px 10px; font-size: 10px; cursor: pointer; font-family: 'DM Mono', monospace; transition: all 0.2s; }
+  .logout-btn:hover { border-color: var(--danger); color: var(--danger); }
+
+  /* Test Input Card */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; }
+  .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+  .card-title { font-family: 'Fraunces', serif; font-size: 18px; font-weight: 300; letter-spacing: -0.3px; }
+  .card-subtitle { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  .form-group { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+  .form-label { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+  .form-select, .form-textarea { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; color: var(--text); font-family: inherit; font-size: 13px; outline: none; transition: border-color 0.2s; }
+  .form-select:focus, .form-textarea:focus { border-color: var(--accent); }
+  .form-select { cursor: pointer; }
+  .form-select option { background: var(--surface2); color: var(--text); }
+  .form-textarea { resize: vertical; min-height: 70px; line-height: 1.6; font-family: 'Syne', sans-serif; }
+
+  .form-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+  .status-line { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
+  .btn-run { display: inline-flex; align-items: center; gap: 8px; padding: 12px 24px; border-radius: 10px; border: none; background: linear-gradient(135deg, var(--accent), #9f7aea); color: white; font-family: 'Syne', sans-serif; font-weight: 600; font-size: 13px; cursor: pointer; transition: all 0.2s; }
+  .btn-run:hover:not(:disabled) { transform: scale(1.02); box-shadow: 0 0 25px rgba(124,106,247,0.35); }
+  .btn-run:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; }
+  .spinner { width: 12px; height: 12px; border-radius: 50%; border: 2px solid white; border-top-color: transparent; animation: spin 0.7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Results Section */
+  .results-section { display: flex; flex-direction: column; gap: 20px; animation: fadeUp 0.3s ease; }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+
+  /* Metrics Grid */
+  .metrics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .metric-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; position: relative; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between; }
+  .metric-card.highlight { border-color: rgba(124,106,247,0.4); background: linear-gradient(180deg, rgba(124,106,247,0.08) 0%, var(--surface) 100%); }
+  .metric-card.tokens { border-color: rgba(56,189,248,0.3); background: linear-gradient(180deg, rgba(56,189,248,0.05) 0%, var(--surface) 100%); }
+  .metric-label { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 8px; }
+  .metric-value { font-family: 'DM Mono', monospace; font-size: 24px; font-weight: 400; color: var(--text); }
+  .metric-sub { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted); margin-top: 6px; }
+
+  /* Breakdown Visual Card */
+  .breakdown-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px 24px; }
+  .breakdown-bar { height: 16px; border-radius: 8px; background: var(--surface2); overflow: hidden; display: flex; margin: 16px 0 14px; border: 1px solid var(--border); }
+  .bar-seg { height: 100%; transition: width 0.5s ease; position: relative; }
+  .bar-retrieval { background: #38bdf8; }
+  .bar-reranking { background: #f7c26a; }
+  .bar-llm       { background: #7c6af7; }
+  .bar-overhead  { background: #475569; }
+
+  .breakdown-legend { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 8px; }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-family: 'DM Mono', monospace; font-size: 11px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 3px; }
+  .legend-val { color: var(--text); font-weight: 500; }
+  .legend-pct { color: var(--muted); font-size: 10px; margin-left: 2px; }
+
+  /* Answer Preview Card */
+  .answer-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; }
+  .answer-meta { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--muted); display: flex; gap: 14px; margin-bottom: 12px; }
+  .answer-text { font-family: 'DM Mono', monospace; font-size: 13px; line-height: 1.7; color: var(--text); background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; white-space: pre-wrap; max-height: 220px; overflow-y: auto; }
+
+  /* Empty state */
+  .empty-box { padding: 48px 20px; text-align: center; border: 1px dashed var(--border); border-radius: var(--radius); color: var(--muted); font-family: 'DM Mono', monospace; font-size: 12px; }
+
+  /* Toast Notification */
+  .toast { position: fixed; bottom: 24px; right: 24px; z-index: 999; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 18px; font-family: 'DM Mono', monospace; font-size: 12px; animation: slideIn 0.3s ease; max-width: 320px; }
+  .toast.error   { border-color: rgba(247,106,106,0.4); color: var(--danger); }
+  .toast.success { border-color: rgba(106,247,168,0.4); color: var(--success); }
+  @keyframes slideIn { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+  /* Login screen */
+  .login-screen { position: fixed; inset: 0; z-index: 100; background: var(--bg); display: flex; align-items: center; justify-content: center; }
+  .login-card { width: 340px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 32px; }
+  .login-logo { font-family: 'Fraunces', serif; font-size: 24px; font-weight: 300; margin-bottom: 8px; text-align: center; }
+  .login-logo span { color: var(--accent); font-style: italic; }
+  .login-sub { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted); text-align: center; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 22px; }
+  .login-field { margin-bottom: 14px; }
+  .login-field label { display: block; font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 1px; }
+  .login-field input { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; color: var(--text); font-family: 'Syne', sans-serif; font-size: 13px; outline: none; }
+  .login-field input:focus { border-color: var(--accent); }
+  .login-btn { width: 100%; padding: 11px; border-radius: 8px; border: none; background: linear-gradient(135deg, var(--accent), #9f7aea); color: white; font-family: 'Syne', sans-serif; font-weight: 600; font-size: 13px; cursor: pointer; margin-top: 6px; }
+  .login-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .login-error { color: var(--danger); font-family: 'DM Mono', monospace; font-size: 11px; margin-top: 10px; text-align: center; min-height: 14px; }
+  .hidden { display: none !important; }
+
+  @media (max-width: 800px) {
+    .metrics-grid { grid-template-columns: repeat(2, 1fr); }
+    .nav-header { flex-direction: column; align-items: flex-start; gap: 12px; }
+    .nav-actions { width: 100%; justify-content: space-between; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Login Modal -->
+<div class="login-screen" id="loginScreen">
+  <div class="login-card">
+    <div class="login-logo">Doc<span>Mind</span></div>
+    <div class="login-sub">Performance Dashboard</div>
+    <div class="login-field">
+      <label>Email</label>
+      <input type="email" id="authEmail" placeholder="you@example.com" autocomplete="email">
+    </div>
+    <div class="login-field">
+      <label>Password</label>
+      <input type="password" id="authPassword" placeholder="••••••••" autocomplete="current-password">
+    </div>
+    <button class="login-btn" id="authSubmitBtn" onclick="handleAuthSubmit()">Log In</button>
+    <div class="login-error" id="authError"></div>
+  </div>
+</div>
+
+<!-- Main App Root -->
+<div class="container hidden" id="appRoot">
+
+  <!-- Header -->
+  <header class="nav-header">
+    <div class="logo-block">
+      <div class="logo-mark">Doc<span>Mind</span></div>
+      <span class="badge-tag">Performance Dashboard</span>
+    </div>
+    <div class="nav-actions">
+      <a href="index.html" class="back-btn">← Back to Chat</a>
+      <span class="user-pill" id="userEmail">—</span>
+      <button class="logout-btn" onclick="handleLogout()">Log out</button>
+    </div>
+  </header>
+
+  <!-- Benchmark Execution Card -->
+  <section class="card">
+    <div class="card-header">
+      <div>
+        <h2 class="card-title">Run Benchmark Test</h2>
+        <p class="card-subtitle">Execute a query against a document session and capture latency and token consumption.</p>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label" for="sessionSelect">Select Document Session</label>
+      <select class="form-select" id="sessionSelect">
+        <option value="">Loading sessions…</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label" for="questionInput">Test Question</label>
+      <textarea class="form-textarea" id="questionInput" placeholder="Enter a question to test retrieval, reranking, and generation latency..."></textarea>
+    </div>
+
+    <div class="form-actions">
+      <div class="status-line">
+        <div class="status-dot" id="statusDot"></div>
+        <span id="statusText">Ready</span>
+      </div>
+      <button class="btn-run" id="btnRun" onclick="runBenchmark()">
+        <span id="btnRunSpinner" class="spinner hidden"></span>
+        <span id="btnRunText">Run Performance Test</span>
+      </button>
+    </div>
+  </section>
+
+  <!-- Empty Initial State -->
+  <div class="empty-box" id="emptyPlaceholder">
+    No benchmark executed yet. Select a session, enter a query, and click "Run Performance Test".
+  </div>
+
+  <!-- Results Section -->
+  <main class="results-section hidden" id="resultsSection">
+
+    <!-- Latency Cards -->
+    <div>
+      <div class="form-label" style="margin-bottom: 10px;">Pipeline Latency Breakdown</div>
+      <div class="metrics-grid">
+        <div class="metric-card highlight">
+          <div class="metric-label">Total Pipeline</div>
+          <div class="metric-value" id="valTotalLatency">—</div>
+          <div class="metric-sub">End-to-end execution</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Retrieval</div>
+          <div class="metric-value" id="valRetrievalLatency">—</div>
+          <div class="metric-sub">Hybrid Dense + BM25</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Reranking</div>
+          <div class="metric-value" id="valRerankLatency">—</div>
+          <div class="metric-sub">Cross-encoder pass</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">LLM Generation</div>
+          <div class="metric-value" id="valLlmLatency">—</div>
+          <div class="metric-sub">Model inference time</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Latency Proportional Visualization -->
+    <section class="breakdown-card">
+      <div class="form-label">Latency Contribution Distribution</div>
+      <div class="breakdown-bar">
+        <div class="bar-seg bar-retrieval" id="barRetrieval" style="width: 0%" title="Retrieval"></div>
+        <div class="bar-seg bar-reranking" id="barReranking" style="width: 0%" title="Reranking"></div>
+        <div class="bar-seg bar-llm" id="barLlm" style="width: 0%" title="LLM Generation"></div>
+        <div class="bar-seg bar-overhead" id="barOverhead" style="width: 0%" title="Pipeline Overhead"></div>
+      </div>
+      <div class="breakdown-legend">
+        <div class="legend-item">
+          <div class="legend-dot bar-retrieval"></div>
+          <span>Retrieval:</span>
+          <span class="legend-val" id="legRetrieval">—</span>
+          <span class="legend-pct" id="legPctRetrieval"></span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot bar-reranking"></div>
+          <span>Reranking:</span>
+          <span class="legend-val" id="legReranking">—</span>
+          <span class="legend-pct" id="legPctReranking"></span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot bar-llm"></div>
+          <span>LLM Generation:</span>
+          <span class="legend-val" id="legLlm">—</span>
+          <span class="legend-pct" id="legPctLlm"></span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot bar-overhead"></div>
+          <span>Overhead / Prep:</span>
+          <span class="legend-val" id="legOverhead">—</span>
+          <span class="legend-pct" id="legPctOverhead"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Token Usage Cards -->
+    <div>
+      <div class="form-label" style="margin-bottom: 10px;">Token Consumption</div>
+      <div class="metrics-grid">
+        <div class="metric-card tokens">
+          <div class="metric-label">Total Tokens</div>
+          <div class="metric-value" id="valTotalTokens">—</div>
+          <div class="metric-sub">Aggregated across attempts</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Input Tokens</div>
+          <div class="metric-value" id="valInputTokens">—</div>
+          <div class="metric-sub">Prompt + Grounded Context</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Output Tokens</div>
+          <div class="metric-value" id="valOutputTokens">—</div>
+          <div class="metric-sub">Completion tokens generated</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Grounding Score</div>
+          <div class="metric-value" id="valGroundingScore">—</div>
+          <div class="metric-sub" id="valDecisionType">Status: —</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Answer Preview -->
+    <section class="answer-card">
+      <div class="answer-meta">
+        <span id="ansTraceId">Trace: —</span>
+        <span id="ansSourcesCount">Sources: 0</span>
+        <span id="ansTimestamp">—</span>
+      </div>
+      <div class="answer-text" id="ansText"></div>
+    </section>
+
+  </main>
+</div>
+
+<!-- Firebase Module Script -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.17.1/firebase-app.js";
+import {
+  getAuth,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut
+} from "https://www.gstatic.com/firebasejs/12.17.1/firebase-auth.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDgEkwMzZcANv8bADbeV8irPW7SAlVvw68",
+  authDomain: "rag-project-46b0e.firebaseapp.com",
+  projectId: "rag-project-46b0e",
+  storageBucket: "rag-project-46b0e.firebasestorage.app",
+  messagingSenderId: "808730168129",
+  appId: "1:808730168129:web:e8c3f9c04dcd594a58efc0",
+};
+
+const firebaseApp = initializeApp(firebaseConfig);
+const fbAuth = getAuth(firebaseApp);
+
+window.currentIdToken = null;
+window.firebaseAuth = fbAuth;
+
+async function handleAuthSubmit() {
+  const email = document.getElementById('authEmail').value.trim();
+  const password = document.getElementById('authPassword').value;
+  const errEl = document.getElementById('authError');
+  const btn = document.getElementById('authSubmitBtn');
+  errEl.textContent = '';
+
+  if (!email || !password) {
+    errEl.textContent = 'Enter email and password';
+    return;
+  }
+
+  btn.disabled = true;
+  try {
+    await signInWithEmailAndPassword(fbAuth, email, password);
+  } catch (err) {
+    errEl.textContent = err.message.replace('Firebase: ', '').replace(/\(auth\/.*\)\.?/, '');
+  } finally {
+    btn.disabled = false;
+  }
+}
+window.handleAuthSubmit = handleAuthSubmit;
+
+document.getElementById('authPassword')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') handleAuthSubmit();
+});
+
+async function handleLogout() {
+  await signOut(fbAuth);
+}
+window.handleLogout = handleLogout;
+
+onAuthStateChanged(fbAuth, async (user) => {
+  const loginScreen = document.getElementById('loginScreen');
+  const appRoot = document.getElementById('appRoot');
+
+  if (user) {
+    window.currentIdToken = await user.getIdToken();
+    loginScreen.classList.add('hidden');
+    appRoot.classList.remove('hidden');
+    const userEmailEl = document.getElementById('userEmail');
+    if (userEmailEl) userEmailEl.textContent = user.email;
+    loadSessions();
+  } else {
+    window.currentIdToken = null;
+    loginScreen.classList.remove('hidden');
+    appRoot.classList.add('hidden');
+  }
+});
+
+// Proactive refresh every 50 minutes
+setInterval(async () => {
+  if (!fbAuth.currentUser) return;
+  try {
+    window.currentIdToken = await fbAuth.currentUser.getIdToken(true);
+  } catch (error) {
+    console.error('Firebase token refresh failed:', error);
+  }
+}, 50 * 60 * 1000);
+</script>
+
+<!-- Dashboard Logic Script -->
+<script>
+const LOCAL_API = 'http://localhost:8000';
+const PRODUCTION_API = 'https://document-based-retrieval-system-production.up.railway.app';
+
+const isLocalHost =
+  window.location.hostname === 'localhost' ||
+  window.location.hostname === '127.0.0.1' ||
+  window.location.hostname === '0.0.0.0' ||
+  window.location.protocol === 'file:';
+
+const API = isLocalHost ? LOCAL_API : PRODUCTION_API;
+
+let isRunningTest = false;
+
+// ── API Fetch with Bearer Auth & Token Refresh ──────────────────────────────
+async function apiFetch(path, opts = {}) {
+  const requestOptions = { ...opts };
+  const headers = new Headers(requestOptions.headers || {});
+  const token = window.currentIdToken;
+
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+
+  requestOptions.headers = headers;
+
+  let response;
+  try {
+    response = await fetch(API + path, requestOptions);
+  } catch (error) {
+    throw new Error(`Cannot reach API at ${API}`);
+  }
+
+  if (response.status === 401 && window.firebaseAuth?.currentUser) {
+    try {
+      const refreshedToken = await window.firebaseAuth.currentUser.getIdToken(true);
+      window.currentIdToken = refreshedToken;
+      headers.set('Authorization', `Bearer ${refreshedToken}`);
+      response = await fetch(API + path, requestOptions);
+    } catch (_) {
+      // Fall through to original response
+    }
+  }
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => ({ detail: response.statusText }));
+    const detail = errorBody?.detail || response.statusText || `HTTP ${response.status}`;
+    throw new Error(detail);
+  }
+
+  return response.json();
+}
+
+function toast(msg, type = 'success') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+// ── Load Sessions ────────────────────────────────────────────────────────────
+async function loadSessions() {
+  const select = document.getElementById('sessionSelect');
+  try {
+    const data = await apiFetch('/sessions');
+    const sessions = data.sessions || [];
+
+    select.innerHTML = '';
+    if (!sessions.length) {
+      select.innerHTML = '<option value="">No sessions available. Upload a document in Chat first.</option>';
+      return;
+    }
+
+    sessions.forEach((s) => {
+      const opt = document.createElement('option');
+      opt.value = s.session_id;
+      const chunks = s.chunk_count ? `${s.chunk_count} chunks` : '';
+      const msgs = s.message_count ? `${s.message_count} msgs` : '';
+      const meta = [chunks, msgs].filter(Boolean).join(' · ');
+      opt.textContent = `${s.filename || 'Untitled'} (${meta || s.session_id.slice(0, 8)})`;
+      select.appendChild(opt);
+    });
+
+    document.getElementById('statusText').textContent = `Connected · ${sessions.length} sessions available`;
+  } catch (err) {
+    select.innerHTML = '<option value="">Failed to load sessions</option>';
+    document.getElementById('statusText').textContent = `Error loading sessions: ${err.message}`;
+    toast(err.message, 'error');
+  }
+}
+
+// ── Value Formatting Helpers (Defensive: never fabricate numbers) ────────────
+function formatMs(val) {
+  if (val === null || val === undefined) return '—';
+  const num = Number(val);
+  if (!Number.isFinite(num)) return '—';
+  return `${num.toFixed(1)} ms`;
+}
+
+function formatTokens(val) {
+  if (val === null || val === undefined) return '—';
+  const num = Number(val);
+  if (!Number.isFinite(num)) return '—';
+  return num.toLocaleString();
+}
+
+function formatScore(val) {
+  if (val === null || val === undefined) return '—';
+  const num = Number(val);
+  if (!Number.isFinite(num)) return '—';
+  return `${Math.round(num * 100)}%`;
+}
+
+// ── Run Benchmark Test ───────────────────────────────────────────────────────
+async function runBenchmark() {
+  if (isRunningTest) return;
+
+  const sessionSelect = document.getElementById('sessionSelect');
+  const sessionId = sessionSelect.value;
+  const questionInput = document.getElementById('questionInput');
+  const question = questionInput.value.trim();
+
+  if (!sessionId) {
+    toast('Please select a document session first', 'error');
+    return;
+  }
+  if (!question) {
+    toast('Please enter a question to test', 'error');
+    return;
+  }
+
+  const btn = document.getElementById('btnRun');
+  const spinner = document.getElementById('btnRunSpinner');
+  const btnText = document.getElementById('btnRunText');
+  const statusText = document.getElementById('statusText');
+
+  isRunningTest = true;
+  btn.disabled = true;
+  spinner.classList.remove('hidden');
+  btnText.textContent = 'Benchmarking…';
+  statusText.textContent = 'Running hybrid retrieval, reranking, and generation…';
+
+  try {
+    const result = await apiFetch('/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        question: question,
+        run_evaluation: false,
+      }),
+    });
+
+    displayResults(result);
+    statusText.textContent = 'Benchmark completed successfully';
+    toast('Performance test complete', 'success');
+  } catch (error) {
+    statusText.textContent = `Test failed: ${error.message}`;
+    toast(`Benchmark failed: ${error.message}`, 'error');
+  } finally {
+    isRunningTest = false;
+    btn.disabled = false;
+    spinner.classList.add('hidden');
+    btnText.textContent = 'Run Performance Test';
+  }
+}
+
+// ── Render Results & Visualization ──────────────────────────────────────────
+function displayResults(result) {
+  const perf = result.performance || {};
+
+  document.getElementById('emptyPlaceholder').classList.add('hidden');
+  const resultsSection = document.getElementById('resultsSection');
+  resultsSection.classList.remove('hidden');
+
+  // Latency Metrics
+  const retMs = perf.retrieval_latency_ms;
+  const rerankMs = perf.reranking_latency_ms;
+  const llmMs = perf.llm_latency_ms;
+  const totalMs = perf.total_latency_ms;
+
+  document.getElementById('valTotalLatency').textContent = formatMs(totalMs);
+  document.getElementById('valRetrievalLatency').textContent = formatMs(retMs);
+  document.getElementById('valRerankLatency').textContent = formatMs(rerankMs);
+  document.getElementById('valLlmLatency').textContent = formatMs(llmMs);
+
+  // Proportional Visualization Bar
+  const validTotal = Number(totalMs) > 0 ? Number(totalMs) : 0;
+  let retPct = 0;
+  let rerankPct = 0;
+  let llmPct = 0;
+  let overheadPct = 0;
+  let overheadMs = 0;
+
+  if (validTotal > 0) {
+    const validRet = Math.max(0, Number(retMs) || 0);
+    const validRerank = Math.max(0, Number(rerankMs) || 0);
+    const validLlm = Math.max(0, Number(llmMs) || 0);
+
+    overheadMs = Math.max(0, validTotal - (validRet + validRerank + validLlm));
+
+    retPct = (validRet / validTotal) * 100;
+    rerankPct = (validRerank / validTotal) * 100;
+    llmPct = (validLlm / validTotal) * 100;
+    overheadPct = (overheadMs / validTotal) * 100;
+  }
+
+  document.getElementById('barRetrieval').style.width = `${retPct.toFixed(1)}%`;
+  document.getElementById('barReranking').style.width = `${rerankPct.toFixed(1)}%`;
+  document.getElementById('barLlm').style.width = `${llmPct.toFixed(1)}%`;
+  document.getElementById('barOverhead').style.width = `${overheadPct.toFixed(1)}%`;
+
+  document.getElementById('legRetrieval').textContent = formatMs(retMs);
+  document.getElementById('legPctRetrieval').textContent = validTotal ? `(${retPct.toFixed(1)}%)` : '';
+
+  document.getElementById('legReranking').textContent = formatMs(rerankMs);
+  document.getElementById('legPctReranking').textContent = validTotal ? `(${rerankPct.toFixed(1)}%)` : '';
+
+  document.getElementById('legLlm').textContent = formatMs(llmMs);
+  document.getElementById('legPctLlm').textContent = validTotal ? `(${llmPct.toFixed(1)}%)` : '';
+
+  document.getElementById('legOverhead').textContent = formatMs(overheadMs);
+  document.getElementById('legPctOverhead').textContent = validTotal ? `(${overheadPct.toFixed(1)}%)` : '';
+
+  // Token Metrics
+  document.getElementById('valTotalTokens').textContent = formatTokens(perf.total_tokens);
+  document.getElementById('valInputTokens').textContent = formatTokens(perf.input_tokens);
+  document.getElementById('valOutputTokens').textContent = formatTokens(perf.output_tokens);
+
+  // Status & Grounding
+  document.getElementById('valGroundingScore').textContent = formatScore(result.grounding_score);
+  const decMeta = result.decision_metadata;
+  const decType = decMeta?.decision_type || (result.refused ? 'REFUSED' : 'ACCEPTED');
+  document.getElementById('valDecisionType').textContent = `Decision: ${decType}`;
+
+  // Answer preview
+  document.getElementById('ansTraceId').textContent = `Trace: ${result.trace_id || '—'}`;
+  document.getElementById('ansSourcesCount').textContent = `Sources: ${(result.sources || []).length}`;
+  document.getElementById('ansTimestamp').textContent = result.timestamp || new Date().toLocaleTimeString();
+  document.getElementById('ansText').textContent = result.answer || '(No answer text returned)';
+}
+</script>
+</body>
+</html>

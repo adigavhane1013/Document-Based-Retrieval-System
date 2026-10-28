@@ -104,6 +104,14 @@
   .source-item { font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); padding:4px 0; border-bottom:1px solid var(--border); display:flex; gap:8px; }
   .source-item:last-child { border-bottom:none; }
   .source-chunk { color:var(--accent); }
+  .source-item.source-kb { display:flex; flex-direction:column; gap:3px; padding:8px 0; }
+  .source-item.source-kb:first-child { padding-top:0; }
+  .source-item.source-kb:last-child { padding-bottom:0; border-bottom:none; }
+  .source-kb-title { font-family:'Syne',sans-serif; font-size:12px; font-weight:700; color:var(--text); line-height:1.4; }
+  .source-kb-sub { font-size:10px; color:var(--accent2); font-weight:500; margin-bottom:3px; }
+  .source-kb-details { display:flex; flex-direction:column; gap:2px; }
+  .source-kb-line { font-size:10px; color:var(--muted); line-height:1.4; word-break:break-word; }
+  .source-kb-file { font-size:10px; color:var(--muted); margin-top:2px; display:flex; align-items:center; gap:6px; }
   .thinking { display:flex; align-items:center; gap:10px; padding:14px 18px; background:var(--surface2); border:1px solid var(--border); border-radius:14px; border-bottom-left-radius:4px; max-width:200px; }
   .thinking-dots { display:flex; gap:4px; }
   .thinking-dot { width:6px; height:6px; border-radius:50%; background:var(--accent); animation:blink 1.2s infinite; }
@@ -147,6 +155,31 @@
   .attach-btn:hover { border-color:var(--accent); color:var(--accent); }
   .attach-btn:disabled { opacity:0.4; cursor:not-allowed; }
   .logout-btn:hover { border-color:var(--danger); color:var(--danger); }
+
+  /* Responsive layout */
+  @media (max-width: 900px) {
+    .app { grid-template-columns: 250px 1fr; }
+    .chat-header, .chat-area, .input-area { padding-left: 24px; padding-right: 24px; }
+    .msg-bubble, .eval-card, .sources-panel { max-width: 85%; }
+  }
+
+  @media (max-width: 700px) {
+    html, body { overflow: hidden; }
+    .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    .sidebar { max-height: 42vh; border-right: none; border-bottom: 1px solid var(--border); }
+    .logo { padding: 16px 18px 12px; }
+    .upload-zone { margin: 12px 14px; padding: 16px 12px; }
+    .sessions-list { max-height: 18vh; }
+    .status-bar { padding: 8px 16px; }
+    .user-bar { padding: 8px 16px; }
+    .chat-header { padding: 12px 16px; gap: 12px; }
+    .chat-header-info { min-width: 0; }
+    .chat-header-info h2 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .chat-area { padding: 20px 16px; gap: 18px; }
+    .input-area { padding: 12px 16px 16px; }
+    .msg-bubble, .eval-card, .sources-panel { max-width: 92%; }
+    .login-card { width: min(340px, calc(100vw - 32px)); }
+  }
 </style>
 </head>
 <body>
@@ -195,7 +228,7 @@
     </div>
     <div class="status-bar">
       <div class="status-dot"></div>
-      <span id="statusText">API connected · localhost:8000</span>
+      <span id="statusText">Checking API…</span>
     </div>
     <div class="user-bar" id="userBar">
       <span class="user-email">—</span>
@@ -266,6 +299,7 @@ const fbAuth = getAuth(firebaseApp);
 let isSignupMode = false;
 let currentIdToken = null;
 window.currentIdToken = null;
+window.firebaseAuth = fbAuth;
 
 function toggleAuthMode() {
   isSignupMode = !isSignupMode;
@@ -325,6 +359,7 @@ onAuthStateChanged(fbAuth, async (user) => {
   } else {
     currentIdToken = null;
     window.currentIdToken = null;
+window.firebaseAuth = fbAuth;
     loginScreen.classList.remove('hidden');
     appRoot.classList.add('hidden');
   }
@@ -332,232 +367,843 @@ onAuthStateChanged(fbAuth, async (user) => {
 
 // Refresh the ID token every 50 minutes (Firebase tokens expire after 1 hour)
 setInterval(async () => {
-  if (fbAuth.currentUser) { currentIdToken = await fbAuth.currentUser.getIdToken(true); window.currentIdToken = currentIdToken; }
+  if (!fbAuth.currentUser) return;
+  try {
+    currentIdToken = await fbAuth.currentUser.getIdToken(true);
+    window.currentIdToken = currentIdToken;
+  } catch (error) {
+    console.error('Firebase token refresh failed:', error);
+  }
 }, 50 * 60 * 1000);
 </script>
 
 <script>
-const API = 'https://document-based-retrieval-system-production.up.railway.app';
+// ── API configuration ─────────────────────────────────────────────────────────
+const LOCAL_API = 'http://localhost:8000';
+const PRODUCTION_API = 'https://document-based-retrieval-system-production.up.railway.app';
+
+const isLocalHost =
+  window.location.hostname === 'localhost' ||
+  window.location.hostname === '127.0.0.1' ||
+  window.location.hostname === '0.0.0.0' ||
+  window.location.protocol === 'file:';
+
+const API = isLocalHost ? LOCAL_API : PRODUCTION_API;
+
 let currentSessionId = null;
 let sessions = {};
+let isLoadingSession = false;
+let isSendingQuestion = false;
+let isUploading = false;
 
 // ── API ───────────────────────────────────────────────────────────────────────
-async function apiFetch(path, opts={}) {
-  opts.headers = opts.headers || {};
-  if (window.currentIdToken || (typeof currentIdToken !== 'undefined' && currentIdToken)) {
-    opts.headers['Authorization'] = `Bearer ${currentIdToken}`;
+async function apiFetch(path, opts = {}) {
+  const requestOptions = { ...opts };
+  const headers = new Headers(requestOptions.headers || {});
+  const token = window.currentIdToken;
+
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
   }
-  const r = await fetch(API+path, opts);
-  if (!r.ok) { const e=await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail||r.statusText); }
-  return r.json();
+
+  requestOptions.headers = headers;
+
+  let response;
+  try {
+    response = await fetch(API + path, requestOptions);
+  } catch (error) {
+    throw new Error(`Cannot reach API at ${API}`);
+  }
+
+  // If Firebase reports an expired token, refresh it once and retry.
+  if (response.status === 401 && window.firebaseAuth?.currentUser) {
+    try {
+      const refreshedToken = await window.firebaseAuth.currentUser.getIdToken(true);
+      window.currentIdToken = refreshedToken;
+      headers.set('Authorization', `Bearer ${refreshedToken}`);
+      response = await fetch(API + path, requestOptions);
+    } catch (_) {
+      // Fall through to the original API error below.
+    }
+  }
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => ({ detail: response.statusText }));
+    const detail = errorBody?.detail || response.statusText || `HTTP ${response.status}`;
+    throw new Error(detail);
+  }
+
+  return response.json();
+}
+
+function setApiStatus(connected, message = '') {
+  const text = document.getElementById('statusText');
+  const dot = document.querySelector('.status-dot');
+  if (!text) return;
+
+  if (connected) {
+    text.textContent = message || `API connected · ${API.replace(/^https?:\/\//, '')}`;
+    if (dot) dot.style.background = 'var(--success)';
+  } else {
+    text.textContent = message || 'Cannot reach API';
+    if (dot) dot.style.background = 'var(--danger)';
+  }
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
-function toast(msg, type='success') {
-  const el=document.createElement('div'); el.className=`toast ${type}`; el.textContent=msg;
-  document.body.appendChild(el); setTimeout(()=>el.remove(),3500);
+function toast(msg, type = 'success') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3500);
 }
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
 async function loadSessions() {
   try {
     const data = await apiFetch('/sessions');
-    sessions={};
-    data.sessions.forEach(s=>sessions[s.session_id]=s);
+    sessions = {};
+
+    (data.sessions || []).forEach((session) => {
+      sessions[session.session_id] = session;
+    });
+
     renderSessions();
-  } catch(e) {
-    document.getElementById('statusText').textContent='Cannot reach API · is the server running?';
+    setApiStatus(true);
+  } catch (error) {
+    setApiStatus(false, `Cannot reach API · ${error.message}`);
   }
 }
 
 function renderSessions() {
-  const list=document.getElementById('sessionsList');
-  const ids=Object.keys(sessions);
-  if (!ids.length) { list.innerHTML='<div class="empty-sessions">No documents yet.<br>Upload one to begin.</div>'; return; }
-  list.innerHTML=ids.map(id=>{
-    const s=sessions[id];
-    const name=s.filename||'Untitled Document';
-    return `<div class="session-card ${id===currentSessionId?'active':''}" onclick="selectSession('${id}')">
-      <div class="session-name" title="${name}">${name}</div>
-      <div class="session-meta"><span>${s.chunk_count||0} chunks</span><span>${s.message_count||0} msgs</span></div>
-      <button class="session-delete" onclick="deleteSession(event,'${id}')">✕</button>
-    </div>`;
-  }).join('');
+  const list = document.getElementById('sessionsList');
+  const ids = Object.keys(sessions);
+
+  if (!ids.length) {
+    list.innerHTML = '<div class="empty-sessions">No documents yet.<br>Upload one to begin.</div>';
+    return;
+  }
+
+  list.innerHTML = '';
+
+  ids.forEach((id) => {
+    const session = sessions[id];
+    const name = session.filename || 'Untitled Document';
+
+    const card = document.createElement('div');
+    card.className = `session-card ${id === currentSessionId ? 'active' : ''}`;
+    card.dataset.sessionId = id;
+    card.setAttribute('role', 'button');
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('aria-label', `Open ${name}`);
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'session-name';
+    nameEl.title = name;
+    nameEl.textContent = name;
+
+    const meta = document.createElement('div');
+    meta.className = 'session-meta';
+    meta.innerHTML = `<span>${Number(session.chunk_count) || 0} chunks</span><span>${Number(session.message_count) || 0} msgs</span>`;
+
+    const deleteButton = document.createElement('button');
+    deleteButton.className = 'session-delete';
+    deleteButton.type = 'button';
+    deleteButton.title = 'Delete session';
+    deleteButton.setAttribute('aria-label', `Delete ${name}`);
+    deleteButton.textContent = '✕';
+
+    deleteButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      deleteSession(id);
+    });
+
+    card.addEventListener('click', () => selectSession(id));
+    card.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        selectSession(id);
+      }
+    });
+
+    card.append(nameEl, meta, deleteButton);
+    list.appendChild(card);
+  });
+}
+
+function resetGroundingBadge() {
+  const badge = document.getElementById('groundingBadge');
+  badge.textContent = 'Grounding: —';
+  badge.style.color = 'var(--muted)';
+  badge.style.borderColor = 'var(--border)';
 }
 
 async function selectSession(id) {
-  currentSessionId=id; renderSessions();
+  if (!sessions[id]) return;
+
+  // Invalidate any evaluation/send operation tied to the previous session.
+  currentSessionId = id;
+  renderSessions();
+
   document.getElementById('emptyState').classList.add('hidden');
-  const cv=document.getElementById('chatView'); cv.classList.remove('hidden'); cv.style.display='flex';
-  const s=sessions[id];
-  document.getElementById('chatTitle').textContent=s.filename||'Untitled Document';
-  document.getElementById('chatMeta').textContent=`${s.chunk_count||0} chunks · ${s.message_count||0} messages`;
-  document.getElementById('chatArea').innerHTML='';
-  document.getElementById('groundingBadge').textContent='Grounding: —';
+  const chatView = document.getElementById('chatView');
+  chatView.classList.remove('hidden');
+  chatView.style.display = 'flex';
+
+  const session = sessions[id];
+  document.getElementById('chatTitle').textContent = session.filename || 'Untitled Document';
+  updateChatMeta(session);
+  resetGroundingBadge();
+
+  const area = document.getElementById('chatArea');
+  area.innerHTML = '';
+  isLoadingSession = true;
+
   try {
-    const detail=await apiFetch(`/session/${id}`);
-    (detail.messages||[]).forEach(m=>{
-      appendMessage('user',m.question);
-      appendMessage('ai',m.answer,m.grounding_score??null,m.refused,[],m.trace_id||null);
+    const detail = await apiFetch(`/session/${encodeURIComponent(id)}`);
+
+    // The user may have switched sessions while the request was in flight.
+    if (currentSessionId !== id) return;
+
+    (detail.messages || []).forEach((message) => {
+      appendMessage('user', message.question, null, false, [], null, id);
+      appendMessage(
+        'ai',
+        message.answer,
+        message.grounding_score ?? null,
+        message.refused,
+        [],
+        message.trace_id || null,
+        id,
+      );
     });
-  } catch(e){}
+  } catch (error) {
+    if (currentSessionId === id) {
+      toast(`Could not load session: ${error.message}`, 'error');
+    }
+  } finally {
+    isLoadingSession = false;
+  }
+
   scrollChat();
 }
 
-async function deleteSession(e,id) {
-  e.stopPropagation();
+function updateChatMeta(session) {
+  const chunks = Number(session?.chunk_count) || 0;
+  const messages = Number(session?.message_count) || 0;
+  document.getElementById('chatMeta').textContent = `${chunks} chunks · ${messages} messages`;
+}
+
+async function deleteSession(id) {
+  if (!sessions[id]) return;
+
+  const name = sessions[id].filename || 'this document';
+  if (!window.confirm(`Delete ${name}? This cannot be undone.`)) return;
+
   try {
-    await apiFetch(`/session/${id}`,{method:'DELETE'});
+    await apiFetch(`/session/${encodeURIComponent(id)}`, { method: 'DELETE' });
     delete sessions[id];
-    if (currentSessionId===id) { currentSessionId=null; document.getElementById('emptyState').classList.remove('hidden'); document.getElementById('chatView').classList.add('hidden'); }
-    renderSessions(); toast('Session deleted');
-  } catch(err){toast(err.message,'error');}
+
+    if (currentSessionId === id) {
+      currentSessionId = null;
+      document.getElementById('emptyState').classList.remove('hidden');
+      document.getElementById('chatView').classList.add('hidden');
+      document.getElementById('chatArea').innerHTML = '';
+      resetGroundingBadge();
+    }
+
+    renderSessions();
+    toast('Session deleted');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
 }
 
 // ── Upload ────────────────────────────────────────────────────────────────────
-const uploadZone=document.getElementById('uploadZone');
-const fileInput=document.getElementById('fileInput');
-uploadZone.addEventListener('dragover',e=>{e.preventDefault();uploadZone.classList.add('drag-over');});
-uploadZone.addEventListener('dragleave',()=>uploadZone.classList.remove('drag-over'));
-uploadZone.addEventListener('drop',e=>{e.preventDefault();uploadZone.classList.remove('drag-over');if(e.dataTransfer.files.length)handleUpload(e.dataTransfer.files[0]);});
-fileInput.addEventListener('change',()=>{if(fileInput.files.length)handleUpload(fileInput.files[0]);});
+const uploadZone = document.getElementById('uploadZone');
+const fileInput = document.getElementById('fileInput');
+const attachBtn = document.getElementById('attachBtn');
+const chatFileInput = document.getElementById('chatFileInput');
 
-// Attach button in the chat composer — adds file(s) to the CURRENTLY OPEN session
-// instead of always starting a new one.
-const attachBtn=document.getElementById('attachBtn');
-const chatFileInput=document.getElementById('chatFileInput');
-attachBtn.addEventListener('click',()=>{
-  if(!currentSessionId){ toast('Open a document first','error'); return; }
+uploadZone.addEventListener('dragover', (event) => {
+  event.preventDefault();
+  uploadZone.classList.add('drag-over');
+});
+
+uploadZone.addEventListener('dragleave', () => {
+  uploadZone.classList.remove('drag-over');
+});
+
+uploadZone.addEventListener('drop', async (event) => {
+  event.preventDefault();
+  uploadZone.classList.remove('drag-over');
+
+  const files = Array.from(event.dataTransfer.files || []);
+  if (files.length) await uploadFiles(files);
+});
+
+fileInput.addEventListener('change', async () => {
+  const files = Array.from(fileInput.files || []);
+  fileInput.value = '';
+  if (files.length) await uploadFiles(files);
+});
+
+attachBtn.addEventListener('click', () => {
+  if (!currentSessionId) {
+    toast('Open a document first', 'error');
+    return;
+  }
   chatFileInput.click();
 });
-chatFileInput.addEventListener('change',async ()=>{
-  const files=Array.from(chatFileInput.files);
-  chatFileInput.value='';
-  for(const f of files){ await handleUpload(f, currentSessionId); }
+
+chatFileInput.addEventListener('change', async () => {
+  const files = Array.from(chatFileInput.files || []);
+  const targetSessionId = currentSessionId;
+  chatFileInput.value = '';
+
+  if (!targetSessionId || !files.length) return;
+  await uploadFiles(files, targetSessionId);
 });
 
-async function handleUpload(file, targetSessionId) {
-  const progress=document.getElementById('uploadProgress'),fill=document.getElementById('progressFill'),label=document.getElementById('progressLabel'),pct=document.getElementById('progressPct');
-  progress.classList.add('active'); label.textContent=file.name;
-  let p=0; const ticker=setInterval(()=>{p=Math.min(p+Math.random()*15,85);fill.style.width=p+'%';pct.textContent=Math.round(p)+'%';},200);
+async function uploadFiles(files, targetSessionId = null) {
+  if (isUploading) {
+    toast('An upload is already in progress', 'error');
+    return;
+  }
+
+  isUploading = true;
+  fileInput.disabled = true;
+  attachBtn.disabled = true;
+
+  let lastSessionId = targetSessionId;
+
   try {
-    const fd=new FormData(); fd.append('file',file);
-    if(targetSessionId) fd.append('session_id',targetSessionId);
-    const result=await apiFetch('/upload',{method:'POST',body:fd});
-    clearInterval(ticker); fill.style.width='100%'; pct.textContent='100%';
-    setTimeout(()=>{progress.classList.remove('active');fill.style.width='0%';},800);
-    toast(`✓ ${file.name} · ${result.chunk_count} chunks indexed`,'success');
-    await loadSessions(); selectSession(result.session_id); fileInput.value='';
-  } catch(err){clearInterval(ticker);progress.classList.remove('active');fill.style.width='0%';toast(err.message,'error');}
+    for (const file of files) {
+      const result = await handleUpload(file, targetSessionId);
+      if (result?.session_id) lastSessionId = result.session_id;
+    }
+
+    await loadSessions();
+
+    if (lastSessionId && sessions[lastSessionId]) {
+      await selectSession(lastSessionId);
+    }
+  } finally {
+    isUploading = false;
+    fileInput.disabled = false;
+    attachBtn.disabled = false;
+  }
+}
+
+async function handleUpload(file, targetSessionId = null) {
+  const progress = document.getElementById('uploadProgress');
+  const fill = document.getElementById('progressFill');
+  const label = document.getElementById('progressLabel');
+  const pct = document.getElementById('progressPct');
+
+  if (!file) return null;
+
+  progress.classList.add('active');
+  label.textContent = file.name;
+  fill.style.width = '0%';
+  pct.textContent = '0%';
+
+  let progressValue = 0;
+  const ticker = setInterval(() => {
+    progressValue = Math.min(progressValue + Math.random() * 15, 85);
+    fill.style.width = `${progressValue}%`;
+    pct.textContent = `${Math.round(progressValue)}%`;
+  }, 200);
+
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    if (targetSessionId) {
+      formData.append('session_id', targetSessionId);
+    }
+
+    const result = await apiFetch('/upload', {
+      method: 'POST',
+      body: formData,
+    });
+
+    clearInterval(ticker);
+    fill.style.width = '100%';
+    pct.textContent = '100%';
+
+    toast(`✓ ${file.name} · ${result.chunk_count} chunks indexed`, 'success');
+    return result;
+  } catch (error) {
+    clearInterval(ticker);
+    toast(`${file.name}: ${error.message}`, 'error');
+    return null;
+  } finally {
+    clearInterval(ticker);
+    setTimeout(() => {
+      progress.classList.remove('active');
+      fill.style.width = '0%';
+      pct.textContent = '0%';
+    }, 500);
+  }
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
-function appendMessage(role,text,groundingScore=null,refused=false,sources=[],traceId=null) {
-  const area=document.getElementById('chatArea');
-  const wrap=document.createElement('div');
-  wrap.className=`msg msg-${role}${refused?' msg-refused':''}`;
-  if(traceId) wrap.id=`msg-${traceId}`;
-  if(role==='user'){
-    wrap.innerHTML=`<div class="msg-bubble">${escHtml(text)}</div>`;
-  } else {
-    const formatted=escHtml(text).replace(/\[SOURCE:([a-zA-Z0-9_\-]+)\]/g,'<span style="color:var(--accent);font-size:10px">[src:$1]</span>');
-    let scorePill='';
-    if(groundingScore!==null){const cls=groundingScore>=0.8?'score-high':groundingScore>=0.5?'score-mid':'score-low';scorePill=`<span class="score-pill ${cls}">ground ${Math.round(groundingScore*100)}%</span>`;}
-    const srcBtn=sources.length?`<button class="sources-toggle" onclick="toggleSources(this)">sources (${sources.length})</button>`:'';
-    const srcPanel=sources.length?`<div class="sources-panel hidden">${sources.map(s=>`<div class="source-item"><span class="source-chunk">${s.chunk_id||'—'}</span><span>${s.source||''}</span><span>p.${s.page??'?'}</span></div>`).join('')}</div>`:'';
-    // Evaluate button is only offered for traceable, non-refused answers — RAGAS needs the
-    // original question/answer/contexts, which we look up server-side by trace_id.
-    const evalBtn=(traceId && !refused)?`<button class="eval-btn" id="evalBtn-${traceId}" onclick="runEvaluation('${traceId}')">Evaluate</button>`:'';
-    wrap.innerHTML=`<div class="msg-bubble">${formatted}</div><div class="msg-meta">${scorePill}${srcBtn}${evalBtn}</div>${srcPanel}`;
+function appendMessage(
+  role,
+  text,
+  groundingScore = null,
+  refused = false,
+  sources = [],
+  traceId = null,
+  sessionId = null,
+) {
+  const area = document.getElementById('chatArea');
+  const wrap = document.createElement('div');
+  wrap.className = `msg msg-${role}${refused ? ' msg-refused' : ''}`;
+
+  if (traceId) {
+    wrap.id = `msg-${traceId}`;
+    wrap.dataset.traceId = traceId;
   }
-  area.appendChild(wrap); scrollChat();
+
+  if (sessionId) {
+    wrap.dataset.sessionId = sessionId;
+  }
+
+  if (role === 'user') {
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    bubble.innerHTML = escHtml(text);
+    wrap.appendChild(bubble);
+  } else {
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+
+    const formatted = escHtml(text).replace(
+      /\[SOURCE:([a-zA-Z0-9_\-]+)\]/g,
+      '<span style="color:var(--accent);font-size:10px">[src:$1]</span>',
+    );
+    bubble.innerHTML = formatted;
+
+    const meta = document.createElement('div');
+    meta.className = 'msg-meta';
+
+    if (groundingScore !== null && groundingScore !== undefined) {
+      const numericScore = Number(groundingScore);
+      const score = Number.isFinite(numericScore) ? numericScore : 0;
+      const cls = score >= 0.8 ? 'score-high' : score >= 0.5 ? 'score-mid' : 'score-low';
+      meta.insertAdjacentHTML(
+        'beforeend',
+        `<span class="score-pill ${cls}">ground ${Math.round(score * 100)}%</span>`,
+      );
+    }
+
+    if (sources.length) {
+      const sourceButton = document.createElement('button');
+      sourceButton.type = 'button';
+      sourceButton.className = 'sources-toggle';
+      sourceButton.textContent = `sources (${sources.length})`;
+      sourceButton.addEventListener('click', () => {
+        const panel = wrap.querySelector('.sources-panel');
+        if (panel) panel.classList.toggle('hidden');
+      });
+      meta.appendChild(sourceButton);
+    }
+
+    if (traceId && !refused) {
+      const evaluateButton = document.createElement('button');
+      evaluateButton.type = 'button';
+      evaluateButton.className = 'eval-btn';
+      evaluateButton.id = `evalBtn-${traceId}`;
+      evaluateButton.textContent = 'Evaluate';
+      evaluateButton.dataset.traceId = traceId;
+      evaluateButton.dataset.sessionId = sessionId || currentSessionId || '';
+      evaluateButton.addEventListener('click', () => {
+        runEvaluation(traceId, evaluateButton.dataset.sessionId);
+      });
+      meta.appendChild(evaluateButton);
+    }
+
+    wrap.appendChild(bubble);
+    wrap.appendChild(meta);
+
+    if (sources.length) {
+      const sourcePanel = document.createElement('div');
+      sourcePanel.className = 'sources-panel hidden';
+
+      sources.forEach((source) => {
+        const hasKbMeta = Boolean(
+          (source.policy_id && String(source.policy_id).trim()) ||
+          (source.policy_name && String(source.policy_name).trim()) ||
+          (source.heading_path && String(source.heading_path).trim())
+        );
+
+        if (hasKbMeta) {
+          const item = document.createElement('div');
+          item.className = 'source-item source-kb';
+
+          const titleText = (source.policy_name || source.source || source.policy_id || '').trim();
+          if (titleText) {
+            const titleEl = document.createElement('div');
+            titleEl.className = 'source-kb-title';
+            titleEl.textContent = titleText;
+            item.appendChild(titleEl);
+          }
+
+          const policyId = (source.policy_id || '').trim();
+          const version = (source.version || '').trim();
+          const metaParts = [];
+          if (policyId) metaParts.push(policyId);
+          if (version) metaParts.push(`Version ${version}`);
+
+          if (metaParts.length > 0) {
+            const subEl = document.createElement('div');
+            subEl.className = 'source-kb-sub';
+            subEl.textContent = metaParts.join(' · ');
+            item.appendChild(subEl);
+          }
+
+          const detailsEl = document.createElement('div');
+          detailsEl.className = 'source-kb-details';
+
+          const section = (source.section || '').trim();
+          if (section) {
+            const secEl = document.createElement('div');
+            secEl.className = 'source-kb-line';
+            secEl.textContent = `Section: ${section}`;
+            detailsEl.appendChild(secEl);
+          }
+
+          const subsection = (source.subsection || '').trim();
+          if (subsection) {
+            const subSecEl = document.createElement('div');
+            subSecEl.className = 'source-kb-line';
+            subSecEl.textContent = `Subsection: ${subsection}`;
+            detailsEl.appendChild(subSecEl);
+          }
+
+          const headingPath = (source.heading_path || '').trim();
+          if (headingPath) {
+            const headingEl = document.createElement('div');
+            headingEl.className = 'source-kb-line';
+            headingEl.textContent = `Heading: ${headingPath}`;
+            detailsEl.appendChild(headingEl);
+          }
+
+          const chunkId = (source.chunk_id || '').trim();
+          const filename = (source.source || '').trim();
+          if (chunkId || filename) {
+            const fileEl = document.createElement('div');
+            fileEl.className = 'source-kb-file';
+            if (chunkId) {
+              const chunkSpan = document.createElement('span');
+              chunkSpan.className = 'source-chunk';
+              chunkSpan.textContent = chunkId;
+              fileEl.appendChild(chunkSpan);
+            }
+            if (chunkId && filename) {
+              const dot = document.createElement('span');
+              dot.textContent = ' · ';
+              fileEl.appendChild(dot);
+            }
+            if (filename) {
+              const nameSpan = document.createElement('span');
+              nameSpan.textContent = filename;
+              fileEl.appendChild(nameSpan);
+            }
+            detailsEl.appendChild(fileEl);
+          }
+
+          if (detailsEl.childNodes.length > 0) {
+            item.appendChild(detailsEl);
+          }
+
+          sourcePanel.appendChild(item);
+        } else {
+          const item = document.createElement('div');
+          item.className = 'source-item';
+
+          const chunk = document.createElement('span');
+          chunk.className = 'source-chunk';
+          chunk.textContent = source.chunk_id || '—';
+
+          const sourceName = document.createElement('span');
+          sourceName.textContent = source.source || '';
+
+          const page = document.createElement('span');
+          page.textContent = `p.${source.page ?? '?'}`;
+
+          item.append(chunk, sourceName, page);
+          sourcePanel.appendChild(item);
+        }
+      });
+
+      wrap.appendChild(sourcePanel);
+    }
+  }
+
+  area.appendChild(wrap);
+  scrollChat();
 }
 
-function toggleSources(btn){const panel=btn.closest('.msg').querySelector('.sources-panel');if(panel)panel.classList.toggle('hidden');}
+function toggleSources(button) {
+  const panel = button?.closest('.msg')?.querySelector('.sources-panel');
+  if (panel) panel.classList.toggle('hidden');
+}
 
 // ── Evaluation (RAGAS) ────────────────────────────────────────────────────────
-async function runEvaluation(traceId) {
+async function runEvaluation(traceId, sessionId) {
   const btn = document.getElementById(`evalBtn-${traceId}`);
-  if (!btn || btn.disabled) return; // already running or already evaluated
+  if (!btn || btn.disabled) return;
 
-  // Do not rerun if a result card already exists for this answer
+  const resolvedSessionId = sessionId || btn.dataset.sessionId;
+  if (!resolvedSessionId) {
+    toast('Cannot determine the session for this evaluation', 'error');
+    return;
+  }
+
   if (document.getElementById(`evalCard-${traceId}`)) return;
+
+  const oldError = document.getElementById(`evalCard-${traceId}-error`);
+  oldError?.remove();
 
   const originalLabel = btn.textContent;
   btn.disabled = true;
-  btn.innerHTML = `<span class="eval-spinner"></span> Evaluating…`;
+  btn.innerHTML = '<span class="eval-spinner"></span> Evaluating…';
 
   try {
     const result = await apiFetch('/evaluate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: currentSessionId, trace_id: traceId })
+      body: JSON.stringify({
+        session_id: resolvedSessionId,
+        trace_id: traceId,
+      }),
     });
 
-    const fmt = (v) => (v === null || v === undefined) ? 'N/A' : v.toFixed(2);
-    const cardHtml = `
-      <div class="eval-card" id="evalCard-${traceId}">
-        <div class="eval-card-title">Evaluation${result.cached ? ' · cached' : ''}</div>
-        <div class="eval-row"><span class="eval-label">Faithfulness</span><span class="eval-value">${fmt(result.faithfulness)}</span></div>
-        <div class="eval-row"><span class="eval-label">Answer Relevancy</span><span class="eval-value">${fmt(result.answer_relevancy)}</span></div>
-        <div class="eval-row"><span class="eval-label">Hallucination Rate</span><span class="eval-value">${fmt(result.hallucination_rate)}</span></div>
-      </div>`;
+    const formatScore = (value) => {
+      if (value === null || value === undefined) return 'N/A';
+      const number = Number(value);
+      return Number.isFinite(number) ? number.toFixed(2) : 'N/A';
+    };
 
-    const msgEl = document.getElementById(`msg-${traceId}`);
-    if (msgEl) msgEl.insertAdjacentHTML('afterend', cardHtml);
+    const card = document.createElement('div');
+    card.className = 'eval-card';
+    card.id = `evalCard-${traceId}`;
 
-    btn.textContent = 'Evaluated ✓';
-    btn.disabled = true; // stays disabled — result is now shown as a card, no need to re-run
-    scrollChat();
-  } catch (err) {
+    const title = document.createElement('div');
+    title.className = 'eval-card-title';
+    title.textContent = `Evaluation${result.cached ? ' · cached' : ''}`;
+    card.appendChild(title);
+
+    const rows = [
+      ['Faithfulness', result.faithfulness],
+      ['Answer Relevancy', result.answer_relevancy],
+      ['Hallucination Rate', result.hallucination_rate],
+    ];
+
+    rows.forEach(([label, value]) => {
+      const row = document.createElement('div');
+      row.className = 'eval-row';
+
+      const labelEl = document.createElement('span');
+      labelEl.className = 'eval-label';
+      labelEl.textContent = label;
+
+      const valueEl = document.createElement('span');
+      valueEl.className = 'eval-value';
+      valueEl.textContent = formatScore(value);
+
+      row.append(labelEl, valueEl);
+      card.appendChild(row);
+    });
+
     const msgEl = document.getElementById(`msg-${traceId}`);
     if (msgEl) {
-      msgEl.insertAdjacentHTML('afterend', `
-        <div class="eval-card error" id="evalCard-${traceId}-error">
-          <div class="eval-card-title">Evaluation failed</div>
-          <div class="eval-row"><span class="eval-label">${escHtml(err.message)}</span></div>
-        </div>`);
+      msgEl.insertAdjacentElement('afterend', card);
     }
-    toast(`Evaluation failed: ${err.message}`, 'error');
+
+    btn.textContent = 'Evaluated ✓';
+    btn.disabled = true;
+    scrollChat();
+  } catch (error) {
+    const msgEl = document.getElementById(`msg-${traceId}`);
+    if (msgEl) {
+      const errorCard = document.createElement('div');
+      errorCard.className = 'eval-card error';
+      errorCard.id = `evalCard-${traceId}-error`;
+
+      const title = document.createElement('div');
+      title.className = 'eval-card-title';
+      title.textContent = 'Evaluation failed';
+
+      const row = document.createElement('div');
+      row.className = 'eval-row';
+
+      const message = document.createElement('span');
+      message.className = 'eval-label';
+      message.textContent = error.message;
+
+      row.appendChild(message);
+      errorCard.append(title, row);
+      msgEl.insertAdjacentElement('afterend', errorCard);
+    }
+
+    toast(`Evaluation failed: ${error.message}`, 'error');
     btn.disabled = false;
     btn.textContent = originalLabel;
   }
 }
-function showThinking(){const area=document.getElementById('chatArea');const el=document.createElement('div');el.className='msg msg-ai';el.id='thinkingMsg';el.innerHTML=`<div class="thinking"><div class="thinking-dots"><div class="thinking-dot"></div><div class="thinking-dot"></div><div class="thinking-dot"></div></div><span class="thinking-label">Thinking…</span></div>`;area.appendChild(el);scrollChat();}
-function hideThinking(){document.getElementById('thinkingMsg')?.remove();}
-function scrollChat(){const area=document.getElementById('chatArea');area.scrollTop=area.scrollHeight;}
-function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');}
 
-async function sendQuestion() {
-  const input=document.getElementById('questionInput');
-  const q=input.value.trim();
-  if(!q||!currentSessionId) return;
-  const sendBtn=document.getElementById('sendBtn');
-  sendBtn.disabled=true; input.value=''; input.style.height='auto';
-  appendMessage('user',q); showThinking();
-  try {
-    const result=await apiFetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:currentSessionId,question:q})});
-    hideThinking();
-    appendMessage('ai',result.answer,result.grounding_score,result.refused,result.sources||[],result.trace_id||null);
-    const score=result.grounding_score;
-    const badge=document.getElementById('groundingBadge');
-    badge.textContent=`Grounding: ${Math.round(score*100)}%`;
-    badge.style.color=score>=0.8?'var(--success)':score>=0.5?'var(--accent2)':'var(--danger)';
-    badge.style.borderColor=score>=0.8?'rgba(106,247,168,0.3)':score>=0.5?'rgba(247,194,106,0.3)':'rgba(247,106,106,0.3)';
-    sessions[currentSessionId].message_count=(sessions[currentSessionId].message_count||0)+1;
-    document.getElementById('chatMeta').textContent=`${sessions[currentSessionId].chunks||0} chunks · ${sessions[currentSessionId].message_count} messages`;
-    renderSessions();
-  } catch(err){hideThinking();appendMessage('ai',`Error: ${err.message}`,0,true,[]);toast(err.message,'error');}
-  sendBtn.disabled=false; input.focus();
+function showThinking() {
+  hideThinking();
+  const area = document.getElementById('chatArea');
+  const el = document.createElement('div');
+  el.className = 'msg msg-ai';
+  el.id = 'thinkingMsg';
+  el.innerHTML = `
+    <div class="thinking">
+      <div class="thinking-dots">
+        <div class="thinking-dot"></div>
+        <div class="thinking-dot"></div>
+        <div class="thinking-dot"></div>
+      </div>
+      <span class="thinking-label">Thinking…</span>
+    </div>`;
+  area.appendChild(el);
+  scrollChat();
 }
 
-document.getElementById('questionInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendQuestion();}});
-document.getElementById('sendBtn').addEventListener('click',sendQuestion);
-document.getElementById('questionInput').addEventListener('input',function(){this.style.height='auto';this.style.height=Math.min(this.scrollHeight,120)+'px';});
+function hideThinking() {
+  document.getElementById('thinkingMsg')?.remove();
+}
 
-// ── Init ──────────────────────────────────────────────────────────────────────
-// loadSessions() is now triggered by onAuthStateChanged once the user is signed in
-setInterval(() => { if (currentIdToken) loadSessions(); }, 30000);
+function scrollChat() {
+  const area = document.getElementById('chatArea');
+  area.scrollTop = area.scrollHeight;
+}
+
+function escHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/\r?\n/g, '<br>');
+}
+
+function updateGroundingBadge(score) {
+  const badge = document.getElementById('groundingBadge');
+  const numericScore = Number(score);
+
+  if (!Number.isFinite(numericScore)) {
+    resetGroundingBadge();
+    return;
+  }
+
+  badge.textContent = `Grounding: ${Math.round(numericScore * 100)}%`;
+
+  if (numericScore >= 0.8) {
+    badge.style.color = 'var(--success)';
+    badge.style.borderColor = 'rgba(106,247,168,0.3)';
+  } else if (numericScore >= 0.5) {
+    badge.style.color = 'var(--accent2)';
+    badge.style.borderColor = 'rgba(247,194,106,0.3)';
+  } else {
+    badge.style.color = 'var(--danger)';
+    badge.style.borderColor = 'rgba(247,106,106,0.3)';
+  }
+}
+
+async function sendQuestion() {
+  const input = document.getElementById('questionInput');
+  const question = input.value.trim();
+  const sessionIdAtSend = currentSessionId;
+
+  if (!question || !sessionIdAtSend || isSendingQuestion) return;
+
+  const sendBtn = document.getElementById('sendBtn');
+  isSendingQuestion = true;
+  sendBtn.disabled = true;
+  input.disabled = true;
+  attachBtn.disabled = true;
+
+  input.value = '';
+  input.style.height = 'auto';
+  appendMessage('user', question, null, false, [], null, sessionIdAtSend);
+  showThinking();
+
+  try {
+    const result = await apiFetch('/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionIdAtSend,
+        question,
+      }),
+    });
+
+    hideThinking();
+
+    // Do not inject an answer into a different session if the user switched
+    // while the backend was processing the request.
+    if (currentSessionId !== sessionIdAtSend) return;
+
+    appendMessage(
+      'ai',
+      result.answer,
+      result.grounding_score,
+      result.refused,
+      result.sources || [],
+      result.trace_id || null,
+      sessionIdAtSend,
+    );
+
+    updateGroundingBadge(result.grounding_score);
+
+    if (sessions[sessionIdAtSend]) {
+      sessions[sessionIdAtSend].message_count =
+        (Number(sessions[sessionIdAtSend].message_count) || 0) + 1;
+      updateChatMeta(sessions[sessionIdAtSend]);
+      renderSessions();
+    }
+  } catch (error) {
+    hideThinking();
+
+    if (currentSessionId === sessionIdAtSend) {
+      appendMessage('ai', `Error: ${error.message}`, 0, true, [], null, sessionIdAtSend);
+      toast(error.message, 'error');
+    }
+  } finally {
+    isSendingQuestion = false;
+    sendBtn.disabled = false;
+    input.disabled = false;
+    attachBtn.disabled = !currentSessionId;
+    input.focus();
+  }
+}
+
+document.getElementById('questionInput').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    sendQuestion();
+  }
+});
+
+document.getElementById('sendBtn').addEventListener('click', sendQuestion);
+
+document.getElementById('questionInput').addEventListener('input', function () {
+  this.style.height = 'auto';
+  this.style.height = `${Math.min(this.scrollHeight, 120)}px`;
+});
+
+// ── Init / polling ────────────────────────────────────────────────────────────
+setInterval(() => {
+  if (window.currentIdToken && !isLoadingSession) loadSessions();
+}, 30000);
 </script>
 </body>
 </html>

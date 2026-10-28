@@ -329,20 +329,85 @@ class DecisionLayer:
                 "max_attempts must be >= 1"
             )
 
-        faithfulness = scores.get(
-            "faithfulness",
-            0.0,
-        )
-
-        relevance = scores.get(
-            "answer_relevancy",
-            0.0,
-        )
-
         decision_type = "UNKNOWN"
         reason = ""
         should_return = False
         metadata_extra: Dict[str, Any] = {}
+
+        # ──────────────────────────────────────────
+        # EVALUATION UNAVAILABLE
+        # ──────────────────────────────────────────
+        #
+        # A missing scores dict (None) or a None score means the RAGAS
+        # evaluation failed or returned no usable result. Do NOT treat that
+        # as a score of 0.0 — that would fabricate a failing score and
+        # trigger a retry loop against an answer that may already be
+        # grounded.
+        #
+        # When evaluation is unavailable, accept the answer and let the
+        # caller decide. The answer's own grounding score (from the
+        # hallucination filter) is unaffected.
+
+        if scores is None:
+            faithfulness: Optional[float] = None
+            relevance: Optional[float] = None
+        else:
+            faithfulness = scores.get(
+                "faithfulness",
+                0.0,
+            )
+            relevance = scores.get(
+                "answer_relevancy",
+                0.0,
+            )
+
+        if faithfulness is None or relevance is None:
+
+            decision_type = "ACCEPT"
+
+            reason = (
+                "Evaluation unavailable: "
+                "RAGAS returned no usable scores "
+                "(faithfulness="
+                f"{faithfulness}, "
+                f"answer_relevancy={relevance})"
+            )
+
+            should_return = True
+
+            logger.warning(
+                f"[{decision_id}] "
+                "Decision: ACCEPT (evaluation unavailable)"
+            )
+
+            metadata = {
+                "decision_id": decision_id,
+                "decision_type": decision_type,
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "reason": reason,
+                "should_return": should_return,
+                "original_answer": answer,
+                "scores": {
+                    "faithfulness": faithfulness,
+                    "answer_relevancy": relevance,
+                },
+                "thresholds": {
+                    "faithfulness":
+                        self.faithfulness_threshold,
+                    "relevance":
+                        self.relevance_threshold,
+                },
+                "timestamp":
+                    datetime.now().isoformat(),
+                **metadata_extra,
+            }
+
+            return (
+                answer,
+                metadata,
+                should_return,
+            )
 
         # ──────────────────────────────────────────
         # REJECT
